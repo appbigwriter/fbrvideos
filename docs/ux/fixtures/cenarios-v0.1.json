@@ -1,0 +1,76 @@
+{
+  "fixture_only": true,
+  "version": "ux-0.1",
+  "notice": "Cenários fictícios de apresentação. Sem geração, custos ou aprovação reais.",
+  "article": {
+    "ref": { "id": "artigo-demo-01", "version": 1 },
+    "title": "Uma pausa nas notificações — exemplo fictício",
+    "author": "Autora fictícia",
+    "source": "Texto de demonstração, sem URL externa",
+    "text": "Neste exemplo editorial fictício, observo como as notificações interrompem minha atenção. Escolho um momento para fazer uma pausa e retomar uma tarefa de cada vez."
+  },
+  "profile": {
+    "ref": { "id": "perfil-demo-01", "version": 1 },
+    "name": "Reflexão editorial — exemplo fictício",
+    "character": "Personagem fictícia",
+    "language": "Português",
+    "format": "Formato ilustrativo a validar no piloto",
+    "calibration_only": false,
+    "notice": "Perfil representado como validado somente neste cenário de UX; sem evidência audiovisual real."
+  },
+  "costs": {
+    "currency": "BRL",
+    "estimated_minor": null,
+    "committed_minor": 0,
+    "confirmed_minor": 0,
+    "ceiling_minor": 5000,
+    "safety_margin_minor": 500
+  },
+  "scenarios": [
+    {
+      "id": "sucesso",
+      "label": "Jornada principal",
+      "route": "artigos",
+      "state": "preparing",
+      "eligibility": { "allowed": true, "calibration_only": false, "blockers": [] }
+    },
+    {
+      "id": "origem-incompleta",
+      "label": "Origem incompleta",
+      "route": "artigo",
+      "state": "preparing",
+      "eligibility": {
+        "allowed": false,
+        "calibration_only": false,
+        "blockers": [{ "code": "source_incomplete", "message": "O corpo do artigo está incompleto. Corrija a captura antes de gerar.", "next_action": "Corrigir extração", "required": true }]
+      }
+    },
+    {
+      "id": "falha",
+      "label": "Falha de montagem",
+      "route": "producao",
+      "state": "failed",
+      "eligibility": { "allowed": true, "calibration_only": false, "blockers": [] },
+      "issue": "A montagem falhou neste exemplo. Componentes válidos e custos foram preservados; repetir somente a montagem."
+    },
+    {
+      "id": "limite",
+      "label": "Limite de custo",
+      "route": "producao",
+      "state": "awaiting_decision",
+      "eligibility": { "allowed": true, "calibration_only": false, "blockers": [] },
+      "costs": { "currency": "BRL", "estimated_minor": null, "committed_minor": 500, "confirmed_minor": 4500, "ceiling_minor": 5000, "safety_margin_minor": 500 },
+      "issue": "Nenhum novo job pago será iniciado. O limite não permite a próxima etapa."
+    },
+    {
+      "id": "correcao",
+      "label": "Correção localizada",
+      "route": "revisao",
+      "state": "ready_for_review",
+      "eligibility": { "allowed": true, "calibration_only": false, "blockers": [] },
+      "render_ref": { "id": "render-demo-01", "version": 1 },
+      "approval": null,
+      "correction": { "proposal_id": "proposta-demo-01", "estimated_minor": 700, "target_scene_id": "plano-demo-02", "affected": ["imagem", "clipe", "montagem"], "preserved": ["roteiro", "áudio", "legendas"] }
+    }
+  ]
+}

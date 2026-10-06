@@ -1,0 +1,1 @@
+{ "name": "@fbr/worker", "version": "0.0.1", "private": true, "type": "module", "dependencies": { "@fbr/contracts": "0.1.0", "@fbr/infra": "0.1.0", "@fbr/pipeline": "0.0.1" } }

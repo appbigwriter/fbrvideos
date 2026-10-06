@@ -1,0 +1,250 @@
+/* Estilos de Revisão de Cenas e Apontamentos (AG-08) */
+
+.scene-review-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xl, 32px);
+  width: 100%;
+}
+
+.scene-review-box {
+  background-color: var(--color-bg-surface, #1e293b);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-lg, 12px);
+  padding: var(--spacing-xl, 32px);
+  text-align: center;
+}
+
+.scene-review-loading,
+.scene-review-error,
+.scene-review-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-md, 16px);
+}
+
+.scene-review-subtitle {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-text-primary, #f8fafc);
+  margin-bottom: var(--spacing-md, 16px);
+}
+
+.scene-review-layout-grid {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: var(--spacing-xl, 32px);
+  align-items: start;
+}
+
+/* Coluna de Cenas */
+.scene-review-list-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md, 16px);
+}
+
+.scene-review-cards-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md, 16px);
+}
+
+.scene-review-card {
+  background-color: var(--color-bg-surface, #1e293b);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-lg, 12px);
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.scene-review-card:hover {
+  border-color: var(--color-border-active, #3b82f6);
+}
+
+.scene-review-card-selected {
+  border-color: var(--color-accent, #3b82f6);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
+  background-color: rgba(30, 41, 59, 0.95);
+}
+
+.scene-select-button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: var(--spacing-md, 16px);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm, 8px);
+  font-family: inherit;
+  color: inherit;
+}
+
+.scene-select-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring, #60a5fa);
+  outline-offset: -2px;
+}
+
+.scene-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm, 8px);
+  flex-wrap: wrap;
+}
+
+.scene-card-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-text-primary, #f8fafc);
+}
+
+.scene-time-badge {
+  font-family: monospace;
+  font-size: 0.8rem;
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--color-text-secondary, #94a3b8);
+}
+
+.scene-transcript-text {
+  font-size: 0.88rem;
+  color: var(--color-text-secondary, #94a3b8);
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.scene-selected-indicator {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-accent, #3b82f6);
+  margin-top: 2px;
+}
+
+.scene-review-empty-list {
+  background-color: var(--color-bg-surface, #1e293b);
+  border: 1px dashed var(--color-border, #334155);
+  border-radius: var(--radius-lg, 12px);
+  padding: var(--spacing-xl, 32px);
+  text-align: center;
+  color: var(--color-text-secondary, #94a3b8);
+}
+
+/* Coluna de Formulário de Apontamentos */
+.scene-review-form-column {
+  position: sticky;
+  top: var(--spacing-lg, 24px);
+}
+
+.scene-comment-section {
+  background-color: var(--color-bg-surface, #1e293b);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-lg, 12px);
+  padding: var(--spacing-lg, 24px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md, 16px);
+}
+
+.current-timecode-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  padding: var(--spacing-sm, 8px) var(--spacing-md, 16px);
+  border-radius: var(--radius-md, 8px);
+}
+
+.timecode-label {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary, #94a3b8);
+}
+
+.timecode-value {
+  font-family: monospace;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-accent, #3b82f6);
+}
+
+.scene-comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md, 16px);
+}
+
+.submit-reason-box {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-xs, 4px);
+  font-size: 0.82rem;
+  color: var(--color-text-muted, #64748b);
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  padding: 8px 12px;
+  border-radius: var(--radius-md, 8px);
+}
+
+.command-error-box {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  padding: 10px 14px;
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.85rem;
+}
+
+.form-actions-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--spacing-xs, 4px);
+}
+
+.btn-submit-comment {
+  background-color: var(--color-accent, #3b82f6);
+  color: #ffffff;
+  border: none;
+  padding: 10px 20px;
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+  width: 100%;
+  justify-content: center;
+}
+
+.btn-submit-comment:hover:not(:disabled) {
+  background-color: var(--color-accent-hover, #60a5fa);
+}
+
+.btn-submit-comment:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--color-bg-surface-hover, #334155);
+}
+
+/* Responsividade Mobile / 360px */
+@media (max-width: 900px) {
+  .scene-review-layout-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scene-review-form-column {
+    position: static;
+  }
+}

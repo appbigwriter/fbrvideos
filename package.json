@@ -1,0 +1,53 @@
+{
+  "name": "fbr-videos",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.11.1 <25"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "verify": "npm run typecheck && npm run test:contracts && npm run test:s1 && npm run test:pipeline && npm run test:web && npm run build:web",
+    "typecheck": "tsc --noEmit",
+    "test:contracts": "tsx --test packages/contracts/test/*.test.ts",
+    "test:s1": "tsx --test packages/infra/test/*.test.ts",
+    "test:web": "tsx --test apps/web/test/*.test.tsx",
+    "test:pipeline": "tsx --test packages/pipeline/test/*.test.ts",
+    "dev:db": "node --import tsx packages/infra/src/dev-database.ts",
+    "test:live": "node --import tsx packages/infra/src/live-smoke.ts",
+    "test:live:production": "node --import tsx packages/infra/src/production-live-smoke.ts",
+    "db:migrate": "node --env-file-if-exists=.env --import tsx packages/infra/src/migrate.ts",
+    "db:backup": "node --env-file-if-exists=.env --import tsx packages/infra/src/backup.ts",
+    "db:backup:full": "node --env-file-if-exists=.env --import tsx packages/infra/src/full-backup-cli.ts",
+    "dev:web": "vite apps/web --host 127.0.0.1",
+    "build:web": "vite build apps/web",
+    "dev:api": "node --env-file-if-exists=.env --import tsx apps/api/src/server.ts",
+    "dev:worker": "node --env-file-if-exists=.env --import tsx apps/worker/src/server.ts"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "fastify": "^5.5.0",
+    "ipaddr.js": "^2.5.0",
+    "pg": "^8.23.1",
+    "pg-boss": "12.36.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router": "^7.9.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.0.0"
+  }
+}

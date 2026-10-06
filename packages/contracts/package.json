@@ -1,0 +1,4 @@
+{
+  "name": "@fbr/contracts", "version": "0.1.0", "private": true, "type": "module",
+  "exports": { ".": "./src/index.ts", "./fixtures": "./src/fixtures.ts", "./planning-fixtures": "./src/planning-fixtures.ts", "./review-fixtures": "./src/review-fixtures.ts" }
+}

@@ -1,0 +1,361 @@
+/* Estilos de Acompanhamento e Consumo de Produção (AG-07) */
+
+.production-progress-integration { margin: 1rem 0; }
+.production-progress-integration * { min-width: 0; overflow-wrap: anywhere; }
+
+.production-progress-integration .production-progress-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg, 24px);
+  width: 100%;
+}
+
+.production-progress-integration .production-progress-box {
+  background-color: var(--color-bg-surface, #1e293b);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-lg, 12px);
+  padding: var(--spacing-xl, 32px);
+  text-align: center;
+}
+
+.production-progress-integration .production-progress-loading,
+.production-progress-integration .production-progress-error,
+.production-progress-integration .production-progress-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-md, 16px);
+}
+
+.production-progress-integration .production-progress-notice {
+  background-color: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: #93c5fd;
+  padding: var(--spacing-md, 16px);
+  border-radius: var(--radius-md, 8px);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+  font-size: 0.88rem;
+}
+
+.production-progress-integration .production-progress-card {
+  background-color: var(--color-bg-surface, #1e293b);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-lg, 12px);
+  padding: var(--spacing-lg, 24px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg, 24px);
+}
+
+.production-progress-integration .production-progress-subtitle {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-text-primary, #f8fafc);
+  letter-spacing: -0.01em;
+}
+
+/* Header de Status */
+.production-progress-integration .production-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--color-border, #334155);
+  padding-bottom: var(--spacing-md, 16px);
+  flex-wrap: wrap;
+  gap: var(--spacing-md, 16px);
+}
+
+.production-progress-integration .production-progress-title-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+  flex-wrap: wrap;
+}
+
+.production-progress-integration .production-progress-name {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-text-primary, #f8fafc);
+}
+
+.production-progress-integration .production-progress-version {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: var(--color-text-muted, #64748b);
+}
+
+.production-progress-integration .production-progress-stage-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  padding: 6px 12px;
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.88rem;
+}
+
+.production-progress-integration .stage-label {
+  color: var(--color-text-secondary, #94a3b8);
+  font-weight: 500;
+}
+
+.production-progress-integration .stage-value {
+  color: var(--color-text-primary, #f8fafc);
+  font-weight: 700;
+}
+
+/* Pendências */
+.production-progress-integration .production-progress-issues-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm, 8px);
+}
+
+.production-progress-integration .production-progress-issues-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm, 8px);
+}
+
+.production-progress-integration .production-progress-issue-item {
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--spacing-md, 16px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs, 4px);
+}
+
+.production-progress-integration .production-progress-issue-item.issue-required {
+  border-color: rgba(239, 68, 68, 0.4);
+  background-color: rgba(239, 68, 68, 0.04);
+}
+
+.production-progress-integration .issue-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+}
+
+.production-progress-integration .issue-icon {
+  font-size: 1rem;
+}
+
+.production-progress-integration .issue-message-text {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--color-text-primary, #f8fafc);
+  flex: 1;
+}
+
+.production-progress-integration .issue-badge-required {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  background-color: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.production-progress-integration .issue-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  padding-left: 24px;
+}
+
+.production-progress-integration .action-label {
+  color: var(--color-text-secondary, #94a3b8);
+  font-weight: 600;
+}
+
+.production-progress-integration .action-text {
+  color: var(--color-text-secondary, #94a3b8);
+}
+
+.production-progress-integration .production-progress-no-issues {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+  background-color: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  color: #34d399;
+  padding: var(--spacing-md, 16px);
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.9rem;
+}
+
+/* Grid de Consumo */
+.production-progress-integration .consumption-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--spacing-md, 16px);
+}
+
+.production-progress-integration .consumption-item {
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--spacing-md, 16px);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.production-progress-integration .consumption-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-secondary, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.production-progress-integration .consumption-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-text-primary, #f8fafc);
+}
+
+.production-progress-integration .consumption-value.value-unavailable {
+  color: var(--color-text-muted, #64748b);
+  font-size: 0.95rem;
+  font-weight: 500;
+  font-style: italic;
+}
+
+.production-progress-integration .consumption-notice-box {
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--spacing-md, 16px);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm, 8px);
+  font-size: 0.85rem;
+  color: var(--color-text-secondary, #94a3b8);
+}
+
+/* Comandos e Ações */
+.production-progress-integration .production-command-error {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  padding: var(--spacing-md, 16px);
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.9rem;
+}
+
+.production-progress-integration .commands-disclaimer-box {
+  background-color: var(--color-bg-base, #0f172a);
+  border: 1px solid var(--color-border, #334155);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--spacing-md, 16px);
+  font-size: 0.85rem;
+  color: var(--color-text-secondary, #94a3b8);
+  line-height: 1.5;
+}
+
+.production-progress-integration .commands-buttons-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--spacing-md, 16px);
+}
+
+.production-progress-integration .command-action-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.production-progress-integration .btn-command {
+  padding: 10px 16px;
+  border-radius: var(--radius-md, 8px);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  border: none;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+  width: 100%;
+  text-align: center;
+}
+
+.production-progress-integration .btn-refresh {
+  background-color: var(--color-bg-base, #0f172a);
+  color: var(--color-text-primary, #f8fafc);
+  border: 1px solid var(--color-border, #334155);
+}
+
+.production-progress-integration .btn-refresh:hover:not(:disabled) {
+  background-color: var(--color-bg-surface-hover, #334155);
+}
+
+.production-progress-integration .btn-pause {
+  background-color: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.production-progress-integration .btn-pause:hover:not(:disabled) {
+  background-color: rgba(245, 158, 11, 0.25);
+}
+
+.production-progress-integration .btn-resume {
+  background-color: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.production-progress-integration .btn-resume:hover:not(:disabled) {
+  background-color: rgba(59, 130, 246, 0.25);
+}
+
+.production-progress-integration .btn-cancel {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.production-progress-integration .btn-cancel:hover:not(:disabled) {
+  background-color: rgba(239, 68, 68, 0.25);
+}
+
+.production-progress-integration .btn-command:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.production-progress-integration .action-disabled-reason {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary, #94a3b8);
+  line-height: 1.3;
+}
+
+/* Responsividade Mobile / 360px */
+@media (max-width: 600px) {
+  .production-progress-integration .issue-message-text { flex-basis: calc(100% - 32px); }
+  .production-progress-integration .issue-action-row { flex-direction: column; align-items: flex-start; }
+  .production-progress-integration .production-progress-card { padding: 16px; }
+  .production-progress-integration .commands-buttons-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .production-progress-integration .production-progress-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

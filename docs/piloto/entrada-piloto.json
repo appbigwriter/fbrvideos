@@ -1,0 +1,79 @@
+{
+  "pilot_id": "S0-C01",
+  "status": "awaiting_inputs",
+  "context": {
+    "source_document": "04-game-style-tara-lindqvist.md",
+    "source_sha256": "d6165f63903b78f08b911411b5253569b4519c559b45c658fa08bc1c3ab1193c",
+    "source_status": "user_supplied_project_and_character_bible",
+    "blog": "Game Style by Tara Lindqvist",
+    "blog_url": "https://gamestyle.fbr.news",
+    "character": "Tara Lindqvist",
+    "locale_status": "candidate_from_english_us_global_market"
+  },
+  "technical_defaults_status": "team_proposals_for_calibration_not_user_requirements",
+  "files": {
+    "article": null,
+    "character_bible": "../fontes/04-game-style-tara-lindqvist.md",
+    "character_reference": null,
+    "environment_reference": null,
+    "wardrobe_reference": null,
+    "style_reference": null,
+    "voice_sample": null
+  },
+  "decisions": {
+    "reviewer": null,
+    "recipe": null,
+    "language_locale": "en-US",
+    "aspect_ratio": "16:9",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "target_duration_seconds": 60,
+    "audio_sample_rate": 48000,
+    "audio_channels": 2,
+    "audio_loudness_target_lufs": -16,
+    "audio_peak_limit_dbtp": -1,
+    "lip_sync_tolerance_ms": 120,
+    "subtitle_tolerance_ms": 150,
+    "rubric_approval_record": null,
+    "access_verification_record": null,
+    "avatar_or_image_reference_id": null,
+    "voice_reference_id": null,
+    "voice_route": null,
+    "support_route": null,
+    "motion_class": null,
+    "budget_currency": null,
+    "budget_ceiling": null,
+    "max_attempts_per_stage": 2,
+    "max_total_attempts": 12,
+    "budget_authorization_record": null
+  },
+  "integration_plan": {
+    "decision_record": "../arquitetura/integracao-higgsfield-v0.1.md",
+    "status": "candidate_accepted_not_account_or_quality_verified",
+    "image": {
+      "provider_candidate": "higgsfield",
+      "model": null,
+      "operation": null,
+      "access_verification_record": null
+    },
+    "animation": {
+      "provider_candidate": "higgsfield",
+      "model": null,
+      "operation": null,
+      "access_verification_record": null
+    },
+    "voice": {
+      "provider_candidate": "heygen",
+      "route_status": "separate_official_audio_to_validate",
+      "access_verification_record": null
+    },
+    "avatar": {
+      "provider_candidate": "heygen",
+      "route_status": "approved_official_audio_to_validate",
+      "access_verification_record": null
+    },
+    "catalog_policy": "preserve_technical_catalog_enable_recurring_repertoire_only_after_calibration",
+    "storage_policy": "copy_completed_media_to_immutable_asset_store"
+  }
+}

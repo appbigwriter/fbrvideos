@@ -1,0 +1,1 @@
+{ "name": "@fbr/infra", "version": "0.1.0", "private": true, "type": "module", "exports": { ".": "./src/index.ts" }, "dependencies": { "@fbr/contracts": "0.1.0", "@fbr/domain": "0.1.0", "@fbr/pipeline": "0.0.1", "pg-boss": "12.36.0" } }
