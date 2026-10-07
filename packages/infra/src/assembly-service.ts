@@ -60,6 +60,7 @@ export class LocalAssemblyService{
       return{p,d,delivery:snapshot.profile.delivery,previousDossiers};
     });
     if('result'in claimed)return claimed.result;
+    const heartbeat=setInterval(()=>{void this.db.query("UPDATE assembly_runs SET heartbeat_at=CURRENT_TIMESTAMP WHERE command_id=$1 AND state='running' AND lease_token=$2",[request.command_id,token]).catch(()=>{});},30000);heartbeat.unref();
     try{
       const timeline=assembleTimeline(claimed.d,claimed.delivery,request.bindings as AssemblyBindings,claimed.previousDossiers);
       const render=await renderLocalPreview(claimed.d,timeline,this.files,this.tools,claimed.previousDossiers);
@@ -102,10 +103,10 @@ export class LocalAssemblyService{
     }catch(error){
       await this.db.query("UPDATE assembly_runs SET state='failed',diagnostic='local_assembly_failed' WHERE command_id=$1 AND state='running' AND lease_token=$2",[request.command_id,token]);
       throw error;
-    }
+    }finally{clearInterval(heartbeat);}
   }
   async reconcileInterrupted(){
-    const result=await this.db.query("UPDATE assembly_runs SET state='failed',diagnostic='local_assembly_interrupted' WHERE state='running' AND started_at<CURRENT_TIMESTAMP-INTERVAL '3 minutes' RETURNING command_id");
+    const result=await this.db.query("UPDATE assembly_runs SET state='failed',diagnostic='local_assembly_interrupted' WHERE state='running' AND heartbeat_at<CURRENT_TIMESTAMP-INTERVAL '3 minutes' RETURNING command_id");
     return result.rowCount??0;
   }
 }

@@ -1,24 +1,24 @@
-import { PostgresDatabase, PostgresGenerationQueue, GenerationTransport,LocalImmutableAssetStore,loadProviderRuntime } from '@fbr/infra';
+import { PostgresDatabase, PostgresGenerationQueue, GenerationTransport,LocalImmutableAssetStore,loadProviderRuntime,createProviderRuntime } from '@fbr/infra';
 import { SimulatedGenerationAdapter } from '@fbr/pipeline';
 import type { GenerationAdapter } from '@fbr/contracts';
 
 if (!process.env.DATABASE_URL) throw new Error('Defina DATABASE_URL e execute db:migrate antes de iniciar o worker.');
 const mode=process.env.FBR_GENERATION_MODE;
-if (!['simulated','provisioned'].includes(mode??'')) throw new Error('Selecione FBR_GENERATION_MODE=simulated ou provisioned com bindings explícitos.');
+if (!['simulated','synthetic','provisioned'].includes(mode??'')) throw new Error('Selecione FBR_GENERATION_MODE=simulated, synthetic ou provisioned com bindings explícitos.');
 const db = new PostgresDatabase(process.env.DATABASE_URL),defaultFiles=new LocalImmutableAssetStore(process.env.FBR_ASSET_ROOT??'var/assets');
-const providers=mode==='provisioned'?await loadProviderRuntime(process.env.FBR_PROVIDER_BINDINGS_MODULE,{db,files:defaultFiles}):null;
+const providers=mode==='synthetic'?await createProviderRuntime({db,files:defaultFiles}):mode==='provisioned'?await loadProviderRuntime(process.env.FBR_PROVIDER_BINDINGS_MODULE,{db,files:defaultFiles}):null;
 if(mode==='provisioned'&&!providers)throw new Error('Modo provisioned exige FBR_PROVIDER_BINDINGS_MODULE.');
 const queue=new PostgresGenerationQueue(db,providers?.admission.bind(providers));
 const adapters = new Map<string, GenerationAdapter>();
 if(providers)for(const [id,adapter]of providers.adapters)adapters.set(id,adapter);
 else for (const operation of ['audio', 'image', 'animation', 'avatar', 'render'] as const)adapters.set(`sim_${operation}`, new SimulatedGenerationAdapter(operation));
-const transport = new GenerationTransport(process.env.DATABASE_URL, db, queue, adapters,'pgboss',undefined,providers?.admitReal.bind(providers),providers?.advance?.bind(providers));
+const transport = new GenerationTransport(process.env.DATABASE_URL, db, queue, adapters,'pgboss',undefined,providers?.admitReal.bind(providers),providers?.advance?.bind(providers),providers?.canExecute?.bind(providers));
 await transport.start();
 let dispatching = false;
 const dispatch = async () => {
   if (dispatching) return;
   dispatching = true;
-  try { await transport.dispatchPending(); }
+  try { await providers?.recover?.();await transport.dispatchPending(); }
   catch { console.error('Despacho pendente; nenhuma intenção foi descartada.'); }
   finally { dispatching = false; }
 };

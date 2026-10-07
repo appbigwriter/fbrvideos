@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { AssetSchema, TimelineSchema, DossierSchema, type AssetStore, type Asset, type Timeline, type Dossier } from '@fbr/contracts';
 import { sameRef } from '@fbr/domain';
 import {audioSpecificationMatches} from '@fbr/pipeline';
+import { probeLocalMedia } from './media-probe.js';
 
 const run = promisify(execFile);
 export interface RenderExecutables { ffmpeg: string; ffprobe: string }
@@ -61,6 +62,11 @@ export async function renderLocalPreview(rawDossier: Dossier, rawTimeline: Timel
       const bytes = await store.read(asset.file.storage_key);
       // Verificar os bytes efetivamente copiados elimina divergência entre exists/read.
       if (bytes.length !== asset.file.bytes || createHash('sha256').update(bytes).digest('hex') !== asset.file.hash) throw new Error('render_asset_hash_mismatch');
+      const measured = await probeLocalMedia(bytes, asset.type as 'image' | 'audio' | 'clip', tools);
+      if (measured.mime_type !== asset.file.mime_type || measured.width !== asset.file.width || measured.height !== asset.file.height
+        || (asset.type !== 'image' && (measured.duration_seconds === null || asset.file.duration_seconds === null
+          || Math.abs(measured.duration_seconds - asset.file.duration_seconds) > (asset.type === 'audio' ? 0.001 : 1 / delivery.fps))))
+        throw new Error('render_input_measurement_mismatch');
       const extensions:Record<string,string>={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','audio/wav':'.wav','audio/mpeg':'.mp3','audio/mp4':'.m4a','video/mp4':'.mp4'};
       const extension=extensions[asset.file.mime_type];
       if(!extension||(asset.type==='image'?!asset.file.mime_type.startsWith('image/'):asset.type==='audio'?!asset.file.mime_type.startsWith('audio/'):asset.file.mime_type!=='video/mp4'))throw new Error('render_input_mime_unsupported');
@@ -68,7 +74,9 @@ export async function renderLocalPreview(rawDossier: Dossier, rawTimeline: Timel
       await writeFile(path, bytes, { flag: 'wx' });
       const duration = segment.end_seconds - segment.start_seconds;
       if (asset.type === 'image') args.push('-loop', '1', '-framerate', String(delivery.fps), '-t', String(duration));
-      args.push('-protocol_whitelist', 'file,pipe', '-i', path);
+      args.push('-protocol_whitelist', 'file,pipe');
+      if (asset.file.mime_type === 'video/mp4' || asset.file.mime_type === 'audio/mp4') args.push('-enable_drefs', '0', '-use_absolute_path', '0');
+      args.push('-i', path);
       if (visual) {
         const frames = Math.round(segment.end_seconds * delivery.fps) - Math.round(segment.start_seconds * delivery.fps);
         if (frames < 1) throw new Error('render_shot_shorter_than_frame');

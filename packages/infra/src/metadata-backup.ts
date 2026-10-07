@@ -30,7 +30,19 @@ const version6Tables = { ...legacyTables,
 const version7Tables={...version6Tables,correction_proposal_heads:['id','production_id','point_id','version'],correction_proposal_revisions:['id','version','record']} as const;
 const version8Tables={...version7Tables,assembly_runs:['command_id','fingerprint','production_id','production_version','state','lease_token','started_at','result','diagnostic']} as const;
 const version9Tables={...version8Tables,correction_execution_plans:['id','correction_id','production_id','hash','record']} as const;
-const tables={...version9Tables,provider_http_intents:['adapter_id','execution_key','attempt','production_id','fingerprint','record']} as const;
+const version10Tables={...version9Tables,provider_http_intents:['adapter_id','execution_key','attempt','production_id','fingerprint','record']} as const;
+const tables={...version10Tables,
+  assembly_runs:['command_id','fingerprint','production_id','production_version','state','lease_token','started_at','result','diagnostic','heartbeat_at'],
+  calibration_observations:['id','version','production_id','production_version','profile_id','profile_version','fingerprint','record'],
+  calibration_profile_decisions:['id','profile_id','profile_version','report_hash','record'],
+  provider_normalized_receipts:['adapter_id','external_id','execution_key','attempt','record'],
+  provider_callback_inbox:['adapter_id','event_id','execution_id','payload_hash','received_at','processed_at','attempts','lease_until','lease_token','next_attempt_at','diagnostic'],
+  provider_quotes:['adapter_id','execution_key','attempt','record'],
+  pipeline_commands:['command_id','production_id','fingerprint','result'],
+  source_edit_audits:['command_id','production_id','record'],
+  synthetic_generation_results:['external_id','production_id','fingerprint','record'],
+  production_budget_commands:['command_id','production_id','fingerprint','record','result'],
+} as const;
 const rowSchemas = Object.fromEntries(Object.entries(tables).map(([name, columns]) => [name,
   z.array(z.strictObject(Object.fromEntries(columns.map(column => [column, z.json()]))))]));
 const legacyRows = Object.fromEntries(Object.keys(legacyTables).map(name=>[name,rowSchemas[name]!]));
@@ -40,13 +52,15 @@ const version6Rows=Object.fromEntries(Object.keys(version6Tables).map(name=>[nam
 const Version6BackupContentSchema=z.strictObject({format:z.literal('fbr-metadata-6'),created_at:TimestampSchema,includes_asset_bytes:z.literal(false),tables:z.strictObject(version6Rows)});
 const version7Rows=Object.fromEntries(Object.keys(version7Tables).map(name=>[name,rowSchemas[name]!]));
 const Version7BackupContentSchema=z.strictObject({format:z.literal('fbr-metadata-7'),created_at:TimestampSchema,includes_asset_bytes:z.literal(false),tables:z.strictObject(version7Rows)});
-const version8Rows=Object.fromEntries(Object.keys(version8Tables).map(name=>[name,rowSchemas[name]!]));
+const version8Rows=Object.fromEntries(Object.entries(version8Tables).map(([name,columns])=>[name,z.array(z.strictObject(Object.fromEntries(columns.map(column=>[column,z.json()]))))]));
 const Version8BackupContentSchema=z.strictObject({format:z.literal('fbr-metadata-8'),created_at:TimestampSchema,includes_asset_bytes:z.literal(false),tables:z.strictObject(version8Rows)});
-const version9Rows=Object.fromEntries(Object.keys(version9Tables).map(name=>[name,rowSchemas[name]!]));
+const version9Rows=Object.fromEntries(Object.entries(version9Tables).map(([name,columns])=>[name,z.array(z.strictObject(Object.fromEntries(columns.map(column=>[column,z.json()]))))]));
 const Version9BackupContentSchema=z.strictObject({format:z.literal('fbr-metadata-9'),created_at:TimestampSchema,includes_asset_bytes:z.literal(false),tables:z.strictObject(version9Rows)});
-const BackupContentSchema = z.strictObject({ format: z.literal('fbr-metadata-10'), created_at: TimestampSchema,
+const version10Rows=Object.fromEntries(Object.entries(version10Tables).map(([name,columns])=>[name,z.array(z.strictObject(Object.fromEntries(columns.map(column=>[column,z.json()]))))]));
+const Version10BackupContentSchema=z.strictObject({format:z.literal('fbr-metadata-10'),created_at:TimestampSchema,includes_asset_bytes:z.literal(false),tables:z.strictObject(version10Rows)});
+const BackupContentSchema = z.strictObject({ format: z.literal('fbr-metadata-11'), created_at: TimestampSchema,
   includes_asset_bytes: z.literal(false), tables: z.strictObject(rowSchemas) });
-export const MetadataBackupSchema = z.union([BackupContentSchema.extend({ hash: HashSchema }),Version9BackupContentSchema.extend({hash:HashSchema}),Version8BackupContentSchema.extend({hash:HashSchema}),Version7BackupContentSchema.extend({hash:HashSchema}),Version6BackupContentSchema.extend({hash:HashSchema}),LegacyBackupContentSchema.extend({ hash: HashSchema })]);
+export const MetadataBackupSchema = z.union([BackupContentSchema.extend({ hash: HashSchema }),Version10BackupContentSchema.extend({hash:HashSchema}),Version9BackupContentSchema.extend({hash:HashSchema}),Version8BackupContentSchema.extend({hash:HashSchema}),Version7BackupContentSchema.extend({hash:HashSchema}),Version6BackupContentSchema.extend({hash:HashSchema}),LegacyBackupContentSchema.extend({ hash: HashSchema })]);
 export type MetadataBackup = z.infer<typeof MetadataBackupSchema>;
 
 export async function captureMetadataBackup(db: SqlDatabase): Promise<MetadataBackup> {
@@ -57,7 +71,7 @@ export async function captureMetadataBackup(db: SqlDatabase): Promise<MetadataBa
       const rows = (await client.query(`SELECT ${columns.join(',')} FROM ${table} ORDER BY ${columns[0]}`)).rows;
       content[table] = JSON.parse(JSON.stringify(rows));
     }
-    const payload = BackupContentSchema.parse({ format: 'fbr-metadata-10', created_at: new Date().toISOString(), includes_asset_bytes: false, tables: content });
+    const payload = BackupContentSchema.parse({ format: 'fbr-metadata-11', created_at: new Date().toISOString(), includes_asset_bytes: false, tables: content });
     return MetadataBackupSchema.parse({ ...payload, hash: sha256(canonical(payload)) });
   });
 }
@@ -72,11 +86,12 @@ export async function restoreMetadataBackup(db: SqlDatabase, raw: unknown) {
       throw new Error('metadata_restore_requires_empty_database');
     let restored = 0;
     for (const [table, columns] of Object.entries(tables)) for (const row of backup.tables[table]??[]) {
-      const values = columns.map(column => {
+      const present=columns.filter(column=>column in row);
+      const values = present.map(column => {
         const value = row[column];
         return value !== null && typeof value === 'object' ? JSON.stringify(value) : value;
       });
-      await client.query(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map((_column, i) => `$${i + 1}`).join(',')})`, values);
+      await client.query(`INSERT INTO ${table}(${present.join(',')}) VALUES(${present.map((_column, i) => `$${i + 1}`).join(',')})`, values);
       restored++;
     }
     return restored;

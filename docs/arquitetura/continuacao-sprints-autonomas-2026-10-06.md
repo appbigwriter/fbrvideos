@@ -4,6 +4,8 @@ Diretriz do responsável: implementar todas as frentes que podem ser realizadas 
 
 Este registro sucede `continuacao-s4-s5-2026-10-06.md`. Código provisionado não significa fornecedor conectado, mídia validada ou sprint com aceite humano integral.
 
+Auditoria posterior em 6/10: a [tasklist remanescente](../tasklist-remanescente-2026-10-06.md) corrige a classificação de pendências. Orquestrador concreto, bindings normalizados, ingestão/avaliação de outputs e integração das correções são trabalho interno ainda aberto, implementável sem credenciais externas. Este registro descreve componentes entregues, não uma jornada completa de geração inicial.
+
 ## Implementação entregue
 
 ### S2 — revisão do planejamento
@@ -23,7 +25,7 @@ O runtime dispõe de `PostgresReviewWorkflow.beginGeneration` como entrada inter
 - `ProviderMediaTransfer` separa credencial do fornecedor de storage assinado, valida origens/DNS, limita bytes, mede mídia por port injetado e guarda arquivo imutável pelo hash.
 - Cobrança reconciliada acima do saldo seguro gera impedimento persistido. Jobs ativos/incertos bloqueiam montagem, aprovação e exportação mesmo se o valor reservado for zero.
 
-Clientes REST e testes de contrato não substituem `GenerationAdapter` normalizado da conta. O módulo de composição ainda deve fixar IDs/modelos, resolver inputs aprovados, normalizar estados e faturamento e publicar outputs avaliados. Esses pontos estão provisionados e permanecem desativados até configuração externa verificável.
+Clientes REST e testes de contrato não substituem `GenerationAdapter` normalizado da conta. O módulo de composição ainda deve resolver inputs aprovados, normalizar estados e faturamento e publicar outputs avaliados. Sua implementação com configuração injetável e testes locais é pendência interna; fixar IDs/modelos efetivamente acessíveis e habilitar gasto real exige configuração externa verificável.
 
 ### S4 — montagem e revisão
 
@@ -64,14 +66,16 @@ Cenários incluem MP4 sintético real com FFmpeg, música/fade, correção visua
 
 Conferência de navegador: revisão/entrega/Configurações, navegação por teclado, estados indisponíveis e viewport 360 px sem overflow horizontal. Nenhum erro de console observado nesse recorte. A produção utilizada permanece sem mídia real; não foram declarados aceites para ela. Conferência visual com vídeo real, lip sync e corpus editorial continua externa.
 
-## Pendências que dependem de ação externa
+## Gates externos restantes
+
+Esta tabela reúne apenas os gates externos. As pendências internas de S2–S6 estão detalhadas na tasklist remanescente e não são bloqueadas por estes gates.
 
 | Sprint | Dependência restante |
 | --- | --- |
 | S0 | Artigo real, referência visual, voz/look autorizados, acesso e teto do piloto. |
 | S1 | Revisão humana da jornada e configurações reais. |
 | S2 | Corpus real e aceite editorial do roteiro/direção. |
-| S3 | Credenciais/IDs/modelos da conta, bindings normalizados e estimativa/cobrança verificadas; qualidade de mídia. |
+| S3 | Credenciais/IDs/modelos da conta e estimativa/cobrança verificadas ao vivo; qualidade de mídia. Bindings normalizados são tarefa interna. |
 | S4 | Mídia real, sincronismo labial, continuidade, legibilidade e avaliação integral. |
 | S5 | Ensaio de correção com outputs reais e aceite da nova direção quando necessário. |
 | S6 | Ambiente final/proxy/domínio/storage, política de retenção e calibração humana repetida. |

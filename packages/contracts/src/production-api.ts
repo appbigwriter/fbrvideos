@@ -10,7 +10,7 @@ export const ProductionSnapshotSchema = z.strictObject({
 });
 export const ProductionEventSchema = z.strictObject({ id: IdSchema, production: VersionRefSchema,
   at: TimestampSchema, type: z.enum(['created','paused','resumed','cancelled','planning_started','planning_completed','planning_failed','costs_updated',
-    'review_point_created','review_point_resolved','final_approved','exported','correction_proposed','correction_cancelled','assembly_completed','speech_edited','correction_estimated','correction_authorized','correction_started','correction_completed','planning_approved','generation_started']),
+    'review_point_created','review_point_resolved','final_approved','exported','correction_proposed','correction_cancelled','assembly_completed','speech_edited','correction_estimated','correction_authorized','correction_started','correction_completed','planning_approved','generation_started','generation_updated']),
   message: z.string().min(1) });
 export const ProductionDetailSchema = z.strictObject({ production: ProductionSchema, snapshot: ProductionSnapshotSchema,
   dossier: DossierSchema.nullable(), events: z.array(ProductionEventSchema),

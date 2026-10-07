@@ -1,15 +1,17 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm,readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
-import { ArticleSchema, ProfileSchema, CharacterSchema, ReferenceSchema, GenerationListSchema, type AdapterResult, type GenerationIntent, type GenerationExecution, type Job } from '@fbr/contracts';
+import { ArticleSchema, ProfileSchema, CharacterSchema, ReferenceSchema, GenerationListSchema,ProductionSchema, type AdapterResult, type GenerationIntent, type GenerationExecution, type Job } from '@fbr/contracts';
 import { buildApp } from '../../../apps/api/src/app.js';
 import { fixtureDelivery, imageFixture, audioFixture, imageEvaluationFixture, audioEvaluationFixture, timelineFixture } from '@fbr/contracts/fixtures';
 import { ConfigurationService, ProductionService, sha256 } from '@fbr/domain';
 import { GenerationWorker, SimulatedGenerationAdapter, getPipelineCatalog } from '@fbr/pipeline';
+import {PostgresBudgetWorkflow} from '../src/budget-workflow.js';
+import {reconcileSettledInvoices} from '../src/provider-callback-inbox.js';
 import { PostgresDatabase, PostgresConfigurationStore, PostgresProductionStore, PostgresGenerationQueue,
   GenerationTransport, PostgresMediaStore, LocalImmutableAssetStore, captureMetadataBackup, restoreMetadataBackup,
   migrateConfiguration, type SqlClient, type SqlDatabase } from '../src/index.js';
@@ -49,6 +51,60 @@ async function accepted(record: GenerationExecution): Promise<Job> {
   const result = await new SimulatedGenerationAdapter('audio').submit(record.intent.request);
   assert.equal(result.outcome, 'accepted'); if (result.outcome !== 'accepted') throw new Error('blocked'); return result.job;
 }
+
+test('Fatura terminal posterior e reembolso conservam output, invalidam aprovação financeira e permitem nova revisão',async()=>{
+  const p=await source(),record=await queue.enqueue(await intent(p.id,100));
+  const claimed=await queue.claim(record.id);assert.ok(claimed?.lease_token);
+  const base={...await accepted(record),status:'succeeded' as const,costs:{currency:'BRL',estimated_minor:100,committed_minor:100,confirmed_minor:100}};
+  await queue.complete(record.id,claimed.lease_token,base);
+  const current=(await productions.detail(p.id)).production;
+  const approved=ProductionSchema.parse({...current,version:current.version+1,status:'approved',stage:'delivery',pending_issues:[],current_render:{id:'synthetic_review_render',version:1},current_approval:{id:'synthetic_final_approval',version:1}});
+  await db.transaction(async client=>{await client.query('INSERT INTO production_revisions(id,version,record) VALUES($1,$2,$3::jsonb)',[approved.id,approved.version,JSON.stringify(approved)]);await client.query('UPDATE production_heads SET version=$2 WHERE id=$1',[approved.id,approved.version]);});
+  const billed={...base,version:2,costs:{...base.costs,confirmed_minor:1200}};
+  const invoice=await queue.reconcileBilling(record.id,billed);assert.equal(invoice.confirmed_minor,1200);
+  const blocked=(await productions.detail(p.id)).production;assert.equal(blocked.status,'ready_for_review');assert.equal(blocked.stage,'review');assert.equal(blocked.current_approval,null);
+  assert.ok(blocked.pending_issues.some(i=>i.code==='budget_reconciliation_overrun'));
+  const refund={...billed,version:3,costs:{...billed.costs,confirmed_minor:90}};
+  const reconciled=await queue.reconcileBilling(record.id,refund);assert.equal(reconciled.state,'succeeded');assert.equal(reconciled.reserved_minor,0);assert.equal(reconciled.confirmed_minor,90);
+  const ready=(await productions.detail(p.id)).production;assert.equal(ready.status,'ready_for_review');assert.equal(ready.current_approval,null);assert.equal(ready.pending_issues.length,0);
+  const replay=await queue.reconcileBilling(record.id,refund);assert.equal(replay.version,reconciled.version);
+  await assert.rejects(queue.reconcileBilling(record.id,{...refund,version:4,costs:{...refund.costs,confirmed_minor:null}}),/não confirmada/);
+  await assert.rejects(queue.reconcileBilling(record.id,billed),/desatualizado/);
+  await assert.rejects(queue.reconcileBilling(record.id,{...refund,version:4,production:{id:'other_production',version:1}}),/intenção/);
+  await assert.rejects(queue.reconcileBilling(record.id,{...refund,version:4,output_assets:[{id:'foreign_output',version:1}]}),/output/);
+  await assert.rejects(queue.reconcileBilling(record.id,{...refund,version:4,costs:{...refund.costs,currency:'USD'}}),/intenção/);
+});
+
+test('Revisão explícita do teto preserva cobranças e registra evidência, CAS e replay',async()=>{
+  await db.query(await readFile(new URL('../migrations/014_budget.sql',import.meta.url),'utf8'));
+  const p=await source(),current=(await productions.detail(p.id)).production,budget=new PostgresBudgetWorkflow(db);
+  const command={command_id:randomUUID(),production:{id:p.id,version:current.version},currency:'BRL',ceiling_minor:2000,reason:'Ensaio da revisão financeira',source:'fixture_budget_owner',evidence:'Evidência exclusivamente sintética; não autoriza gasto real.',reviewed:true};
+  await assert.rejects(budget.revise({...command,reviewed:false}));
+  const raised=await budget.revise(command);assert.equal(raised.costs.ceiling_minor,2000);assert.equal(raised.costs.confirmed_minor,current.costs.confirmed_minor);
+  assert.deepEqual(await new PostgresBudgetWorkflow(db).revise(command),raised);
+  await assert.rejects(budget.revise({...command,ceiling_minor:3000}),/reutilizado/);
+  await assert.rejects(budget.revise({...command,command_id:randomUUID(),ceiling_minor:3000}),/alterada/);
+  await assert.rejects(budget.revise({...command,command_id:randomUUID(),production:{id:p.id,version:raised.version},currency:'USD',ceiling_minor:3000}),/Moeda/);
+  const audit=(await db.query('SELECT record FROM production_budget_commands WHERE command_id=$1',[command.command_id])).rows[0]?.record as {evidence:string;previous_ceiling_minor:number};
+  assert.equal(audit.evidence,command.evidence);assert.equal(audit.previous_ceiling_minor,1000);
+});
+
+test('Reconciliação periódica de faturas terminais consulta adapter liberado sem novo envio',async()=>{
+  const p=await source(),granted=new PostgresGenerationQueue(db,async()=>true),proposed={...await intent(p.id,100),adapter_id:'invoice_audio'};
+  const execution=await granted.enqueue(proposed),claimed=await granted.claim(execution.id);assert.ok(claimed?.lease_token);
+  const base={...await accepted(execution),status:'succeeded' as const,costs:{currency:'BRL',estimated_minor:100,committed_minor:100,confirmed_minor:100}};
+  await granted.complete(execution.id,claimed.lease_token,base);
+  let queries=0,sends=0;
+  class InvoiceAdapter extends SimulatedGenerationAdapter{
+    override async capabilities(){const caps=await super.capabilities();return{...caps,adapter_id:'invoice_audio',mode:'real' as const,evidence_refs:['offline_invoice_contract']};}
+    override async submit(request:GenerationIntent['request']){sends++;return super.submit(request);}
+    override async query(id:string):Promise<AdapterResult>{queries++;assert.equal(id,base.external_job_id);return{outcome:'accepted',job:{...base,version:2,costs:{...base.costs,confirmed_minor:70}}};}
+  }
+  const registry=new Map([['invoice_audio',new InvoiceAdapter('audio')]]);
+  assert.deepEqual(await reconcileSettledInvoices(granted,registry,[p.id],async()=>false),{checked:0,pending:1});assert.equal(queries,0);
+  assert.deepEqual(await reconcileSettledInvoices(granted,registry,[p.id],async()=>true),{checked:1,pending:0});assert.equal(queries,1);assert.equal(sends,0);
+  assert.equal((await granted.get(execution.id))?.confirmed_minor,70);
+});
 test('Reserva concorrente é atômica, replay persiste e outra intenção não reutiliza a chave', async () => {
   const p = await source(), a = await intent(p.id, 600), b = await intent(p.id, 600);
   const results = await Promise.allSettled([queue.enqueue(a), queue.enqueue(b)]);

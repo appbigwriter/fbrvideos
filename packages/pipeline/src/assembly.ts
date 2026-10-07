@@ -2,12 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { DossierSchema, DeliveryProfileSchema, TimelineSchema, type Dossier, type Timeline,
   type Asset, type VersionRef, type DeliveryProfile } from '@fbr/contracts';
 import { sameRef,canonical } from '@fbr/domain';
+import { alignedSubtitleCues, type SubtitleAlignment, type SubtitleLayout } from './subtitle-alignment.js';
 
 export interface AssemblyBindings {
   audio: { speech_segment_id: string; asset: VersionRef }[];
   video: { shot: VersionRef; asset: VersionRef }[];
   music?:Timeline['music'];
   transitions?:Timeline['transitions'];
+  subtitle_alignment?: { speech_segment_id: string; alignment: SubtitleAlignment }[];
+  subtitle_layout?: SubtitleLayout;
 }
 function approvedAsset(dossier: Dossier, ref: VersionRef, types: Asset['type'][]) {
   const asset = dossier.assets.find(asset => sameRef(asset, ref));
@@ -38,6 +41,10 @@ export function assembleTimeline(raw: Dossier, rawDelivery: DeliveryProfile, bin
   if (bindings.audio.length !== speeches.length || new Set(bindings.audio.map(binding => binding.speech_segment_id)).size !== speeches.length)
     throw new Error('assembly_audio_binding_mismatch');
   const audio: Timeline['audio'] = [], subtitles: Timeline['subtitles'] = [];
+  if (bindings.subtitle_alignment && (!bindings.subtitle_layout
+    || new Set(bindings.subtitle_alignment.map(value => value.speech_segment_id)).size !== bindings.subtitle_alignment.length
+    || bindings.subtitle_alignment.some(value => !speeches.some(speech => speech.id === value.speech_segment_id && speech.mode !== 'pause'))))
+    throw new Error('assembly_subtitle_alignment_binding_invalid');
   let totalSamples = 0;
   for (const speech of speeches) {
     const binding = bindings.audio.find(binding => binding.speech_segment_id === speech.id);
@@ -52,7 +59,12 @@ export function assembleTimeline(raw: Dossier, rawDelivery: DeliveryProfile, bin
     const end = totalSamples / delivery.audio_sample_rate;
     audio.push({ start_seconds: start, end_seconds: end, speech_segment_id: speech.id, asset: binding.asset,
       source_in_seconds: 0, source_out_seconds: samples / delivery.audio_sample_rate });
-    if (speech.mode !== 'pause') subtitles.push({ start_seconds: start, end_seconds: end, speech_segment_id: speech.id, text: speech.text });
+    if (speech.mode !== 'pause') {
+      const alignment = bindings.subtitle_alignment?.find(value => value.speech_segment_id === speech.id);
+      if (bindings.subtitle_alignment && !alignment) throw new Error('assembly_subtitle_alignment_missing');
+      if (alignment) subtitles.push(...alignedSubtitleCues(speech.text, asset, alignment.alignment, start, speech.id, bindings.subtitle_layout!));
+      else subtitles.push({ start_seconds: start, end_seconds: end, speech_segment_id: speech.id, text: speech.text });
+    }
   }
   if (bindings.video.length !== dossier.shots.length || new Set(bindings.video.map(binding => `${binding.shot.id}:${binding.shot.version}`)).size !== dossier.shots.length)
     throw new Error('assembly_video_binding_mismatch');

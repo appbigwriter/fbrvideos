@@ -9,6 +9,7 @@ import { ProductionProgressPanel } from '../components/progress/ProductionProgre
 import { FormActions } from '../components/forms/FormActions.js';
 import { Page,ResourceState,refValue } from './ConnectedShared.js';
 import { productionSetup,dossierPresentation,progressPresentation } from './ProductionPresentation.js';
+import {CandidateMediaPanel} from '../components/productions/CandidateMediaPanel.js';
 export function ProductionsPage() {
   const resource=useResource('/productions',ProductionsListSchema);
   return <Page title="Produções"><Link to="/artigos">Selecionar artigo</Link><ResourceState {...resource} onRetry={resource.reload}/>
@@ -71,7 +72,16 @@ export function ProductionPage() {
     <h2>Histórico</h2><ol>{detail.events.map(event=><li key={event.id}>v{event.production.version} · {event.message}</li>)}</ol>
     <p><Link to={`/producoes/${id}/revisao`}>Abrir revisão</Link> · <Link to={`/producoes/${id}/entrega`}>Ver entrega</Link></p>
   </>}<section className="dossier-integration" aria-label="Dossiê de planejamento"><h2>Dossiê de planejamento</h2><DossierPanel data={dossier.data} loading={resource.loading} error={resource.error??dossier.error} onRetry={resource.reload}/></section>
-    {detail&&<PlanningConsent key={`${detail.production.id}:${detail.production.version}`} detail={detail} onSaved={refresh}/>}</Page>;
+    {detail&&<PlanningConsent key={`${detail.production.id}:${detail.production.version}`} detail={detail} onSaved={refresh}/>}
+    {detail&&<GenerationStart detail={detail} onSaved={refresh}/>}
+    {id&&active&&<CandidateMediaPanel productionId={id} onSaved={()=>{resource.refresh();jobs.refresh();}}/>}</Page>;
+}
+function GenerationStart({detail,onSaved}:{detail:ProductionDetail;onSaved:()=>void}){
+  const command=useCommand(),p=detail.production,d=detail.dossier;
+  if(!d||p.status!=='awaiting_decision'||!d.approvals.some(a=>a.kind==='editorial'&&a.status==='active'))return null;
+  return <section aria-label="Iniciar geração"><h2>Gerar mídia</h2><p>O servidor confere conexões, estimativas e limite antes de cada envio. Ensaios sintéticos permanecem identificados.</p>
+    <button type="button" disabled={command.pending} onClick={()=>void command.run(`/productions/${p.id}/generation/start`,ProductionSchema,{production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version}},onSaved)}>Iniciar geração configurada</button>
+    {command.error&&<p role="alert">{command.error}</p>}</section>;
 }
 function PlanningConsent({detail,onSaved}:{detail:ProductionDetail;onSaved:()=>void}){
   const [sources,setSources]=useState(false),[direction,setDirection]=useState(false),command=useCommand(),d=detail.dossier,p=detail.production;
@@ -80,7 +90,7 @@ function PlanningConsent({detail,onSaved}:{detail:ProductionDetail;onSaved:()=>v
     <label><input type="checkbox" checked={sources} disabled={command.pending} onChange={event=>setSources(event.target.checked)}/>Conferi a fidelidade de todas as falas às fontes indicadas.</label>
     <label><input type="checkbox" checked={direction} disabled={command.pending} onChange={event=>setDirection(event.target.checked)}/>Revisei a intenção, direção e referências de todas as cenas.</label>
     <p>A revisão do planejamento não confirma qualidade de mídia ainda não gerada nem autoriza custo desconhecido.</p>
-    <button type="button" disabled={command.pending||!sources||!direction||d.pending_issues.some(issue=>issue.required)} onClick={()=>{
+    <button type="button" disabled={command.pending||!sources||!direction||d.pending_issues.some(issue=>issue.required&&issue.code!=='editorial_review_required')} onClick={()=>{
       void command.run(`/productions/${p.id}/planning/approve`,ProductionSchema,{production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version},reviewed_sources:true,reviewed_direction:true},onSaved);
     }}>Registrar revisão do planejamento</button>{command.error&&<p role="alert">{command.error}</p>}
   </section>;

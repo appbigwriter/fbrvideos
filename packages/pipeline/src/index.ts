@@ -5,3 +5,4 @@ export * from './planner.js';
 export * from './semantic-planner.js';
 export * from './generation-worker.js';
 export * from './assembly.js';
+export * from './subtitle-alignment.js';

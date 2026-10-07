@@ -1,4 +1,4 @@
-import { PostgresDatabase, PostgresConfigurationStore, PostgresProductionStore, PostgresGenerationQueue, CodexOAuthInference,PostgresInferenceJournal, LocalImmutableAssetStore, PostgresReviewWorkflow,operationalState,loadProviderRuntime } from '@fbr/infra';
+import { PostgresDatabase, PostgresConfigurationStore, PostgresProductionStore, PostgresGenerationQueue, CodexOAuthInference,PostgresInferenceJournal, LocalImmutableAssetStore, PostgresReviewWorkflow,operationalState,loadProviderRuntime,createProviderRuntime,CalibrationService,operationalReadiness,RetentionService,createCodexSourceReauditor } from '@fbr/infra';
 import { ConfigurationService, ProductionService } from '@fbr/domain';
 import { buildApp } from './app.js';
 import { getPipelineCatalog, AutomaticPlanner,SemanticPlanner } from '@fbr/pipeline';
@@ -23,14 +23,17 @@ const planner=new AutomaticPlanner(productions,inference
     const current=await productions.store.get(ref.id);return current?.status==='preparing'&&current.version===ref.version;
   }):null);
 const defaultFiles=new LocalImmutableAssetStore(process.env.FBR_ASSET_ROOT??'var/assets');
-const providers=await loadProviderRuntime(process.env.FBR_PROVIDER_BINDINGS_MODULE,{db:database,files:defaultFiles}),files=providers?.files??defaultFiles;
-const app = buildApp(new ConfigurationService(new PostgresConfigurationStore(database)), {productions,planner,generation:new PostgresGenerationQueue(database,providers?.admission.bind(providers)),review:new PostgresReviewWorkflow(database,files,providers?.admission.bind(providers)),operationalState:()=>operationalState(database),
+const providers=process.env.FBR_GENERATION_MODE==='synthetic'?await createProviderRuntime({db:database,files:defaultFiles}):await loadProviderRuntime(process.env.FBR_PROVIDER_BINDINGS_MODULE,{db:database,files:defaultFiles}),files=providers?.files??defaultFiles;
+const sourceAudit=createCodexSourceReauditor(database,mode==='codex_oauth'?process.env.FBR_CODEX_EXECUTABLE!:null);
+const retention=new RetentionService(database,process.env.FBR_ASSET_ROOT??'var/assets',async()=>({verified:false,keys:new Set<string>(),hash:'backup_not_verified'}));
+const app = buildApp(new ConfigurationService(new PostgresConfigurationStore(database)), {productions,planner,generation:new PostgresGenerationQueue(database,providers?.admission.bind(providers)),review:new PostgresReviewWorkflow(database,files,providers?.admission.bind(providers),sourceAudit.auditor),operationalState:()=>operationalState(database),
   ...(providers?.prepareCorrection?{prepareCorrection:providers.prepareCorrection.bind(providers)}:{}),
+  ...(providers?.pipeline?{pipeline:providers.pipeline}:{}),calibration:new CalibrationService(database),readiness:()=>operationalReadiness(database),retentionPlan:()=>retention.dryRun({keep_referenced:true,orphan_grace_days:30}),
   ...(accessToken?{accessToken,secureCookie:!local}:{}),...(allowedHosts?.length?{allowedHosts}:{}),...(allowedOrigins?.length?{allowedOrigins}:{})});
 let recovering=false;
-const recover=async()=>{if(recovering)return;recovering=true;try{await planner.recover();}catch{app.log.error('Recuperação de planejamento pendente.');}finally{recovering=false;}};
+const recover=async()=>{if(recovering)return;recovering=true;try{await planner.recover();await providers?.recover?.();}catch{app.log.error('Recuperação de produção pendente.');}finally{recovering=false;}};
 const recoveryTimer=setInterval(()=>void recover(),5000);recoveryTimer.unref();
-app.addHook('onClose', async () => {clearInterval(recoveryTimer);inference?.close();await planner.waitForIdle();await database.close();});
+app.addHook('onClose', async () => {clearInterval(recoveryTimer);sourceAudit.close();inference?.close();await planner.waitForIdle();await database.close();});
 await app.listen({ host, port: Number(process.env.API_PORT ?? 3001) });
 console.log('API FBR disponível localmente na porta ' + (process.env.API_PORT ?? 3001));
 void recover();

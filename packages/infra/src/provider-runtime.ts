@@ -3,6 +3,7 @@ import {pathToFileURL} from 'node:url';
 import {realpath} from 'node:fs/promises';
 import {AdapterCapabilitiesSchema,type AssetStore,type GenerationAdapter,type GenerationAdmission,type GenerationExecution} from '@fbr/contracts';
 import type {SqlDatabase} from './configuration-store.js';
+import type {ProductionPipeline} from './production-pipeline.js';
 export interface ProviderRuntime{
   files?:AssetStore;
   adapters:ReadonlyMap<string,GenerationAdapter>;
@@ -10,6 +11,9 @@ export interface ProviderRuntime{
   admitReal(execution:GenerationExecution):Promise<boolean>;
   prepareCorrection?(productionId:string):Promise<void>;
   advance?(productionId:string):Promise<void>;
+  pipeline?:ProductionPipeline;
+  recover?():Promise<unknown>;
+  canExecute?(execution:GenerationExecution):Promise<boolean>;
 }
 /** Ponto único de composição para adicionar APIs depois, sem mudar fila, custos ou contratos do domínio. */
 export async function loadProviderRuntime(path:string|undefined,context:{db:SqlDatabase;files:AssetStore}):Promise<ProviderRuntime|null>{

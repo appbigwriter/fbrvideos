@@ -12,7 +12,7 @@ export class GenerationTransport {
   private readonly recoverableIds:string[]=[];
   constructor(connectionString: string, private readonly db: SqlDatabase, private readonly queue: GenerationQueue,
     private readonly adapters: ReadonlyMap<string, GenerationAdapter>, schema = 'pgboss', onError: () => void = () => console.error('Falha no transporte de geração; verificar o estado persistido.'),
-    admitReal?:ConstructorParameters<typeof GenerationWorker>[2],private readonly advance?:(productionId:string)=>Promise<void>) {
+    admitReal?:ConstructorParameters<typeof GenerationWorker>[2],private readonly advance?:(productionId:string)=>Promise<void>,private readonly canExecute?:(execution:import('@fbr/contracts').GenerationExecution)=>Promise<boolean>) {
     if (!/^[a-z][a-z0-9_]*$/.test(schema)) throw new Error('generation_transport_schema_invalid');
     this.boss = new PgBoss({ connectionString, schema });
     this.boss.on('error', onError);
@@ -31,6 +31,7 @@ export class GenerationTransport {
   async process(data: { execution_id: string }) {
     const id = IdSchema.parse(data.execution_id), execution = await this.queue.get(id);
     if (!execution) throw new Error('generation_execution_not_found');
+    if(execution.state==='prepared'&&this.canExecute&&!await this.canExecute(execution))return execution;
     const result = await this.db.query('SELECT r.record FROM production_revisions r JOIN production_heads h USING(id,version) WHERE h.id=$1', [execution.intent.request.production.id]);
     const production = result.rows[0]?.record as { status: string } | undefined;
     const next=await (production?.status === 'cancelled' ? this.worker.cancel(id) : this.worker.run(id));

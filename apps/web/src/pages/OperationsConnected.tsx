@@ -2,6 +2,8 @@ import {Link} from 'react-router';
 import {OperationsViewSchema,PipelineCatalogSchema,ProductionsListSchema,productionStateLabels} from '@fbr/contracts';
 import {useResource} from '../api.js';
 import {Page,ResourceState} from './ConnectedShared.js';
+import {CalibrationPanel} from '../components/operations/CalibrationPanel.js';
+import {RetentionPanel} from '../components/operations/RetentionPanel.js';
 export function OperationsPage(){
   const operations=useResource('/operations',OperationsViewSchema),catalog=useResource('/pipeline/catalog',PipelineCatalogSchema),data=operations.data;
   return <Page title="Configurações"><h2>Estado da operação</h2><ResourceState {...operations} onRetry={operations.reload}/>
@@ -13,6 +15,7 @@ export function OperationsPage(){
     {catalog.data&&<div className="connected-cards">{catalog.data.models.map(model=><article key={model.id}><h3>{model.provider} · {model.model}</h3>
       <p>Operação: {model.operation}. Acesso: {model.account_access==='verified'?'verificado':'pendente'}. Integração: {model.runtime==='real'?'real disponível':model.runtime==='simulated'?'simulação':'configuração do fornecedor pendente'}.</p>
       {model.documentation_url&&<a href={model.documentation_url} target="_blank" rel="noreferrer">Documentação da operação</a>}</article>)}</div>}
+    <CalibrationPanel/><RetentionPanel/>
   </Page>;
 }
 export function HomeConnected(){

@@ -4,7 +4,7 @@ import {OperatorAccess} from './access.js';
 import { CONTRACT_VERSION, EntityKindSchema, IdSchema, ArticleSchema, CharacterSchema, ReferenceSchema, ProfileSchema,
   ArticleListSchema, ArticleFilterOptionsSchema, UniverseSchema, ProfilesSchema, ErrorSchema, type Article, type EntityKind } from '@fbr/contracts';
 import { ApplicationError, ConfigurationService, articleEligibility, ProductionService } from '@fbr/domain';
-import { captureArticle,OperationalTelemetry, type PostgresReviewWorkflow } from '@fbr/infra';
+import { captureArticle,OperationalTelemetry,parseMediaRange, type PostgresReviewWorkflow,type ProductionPipeline,type CalibrationService } from '@fbr/infra';
 import { getPipelineCatalog, checkAudiovisualConfiguration, AutomaticPlanner } from '@fbr/pipeline';
 import { AudiovisualCheckRequestSchema, ProductionsListSchema, ProductionSchema, GenerationListSchema,
   ReviewViewSchema, ReviewPointSchema, DeliveryViewSchema, CorrectionSchema, RenderHistorySchema,SpeechEditViewSchema,
@@ -17,7 +17,7 @@ const versionQuery = z.strictObject({ version: z.coerce.number().int().positive(
 const routeParams = z.strictObject({ id: IdSchema });
 const schemas = { articles: ArticleSchema, characters: CharacterSchema, references: ReferenceSchema, profiles: ProfileSchema };
 
-export function buildApp(service: ConfigurationService, options: { capture?: typeof captureArticle; allowedOrigins?: string[];allowedHosts?:string[];accessToken?:string;secureCookie?:boolean; productions?: ProductionService; planner?: AutomaticPlanner; generation?: GenerationQueue; review?: PostgresReviewWorkflow;operationalState?:()=>Promise<unknown>;prepareCorrection?:(id:string)=>Promise<void> } = {}) {
+export function buildApp(service: ConfigurationService, options: { capture?: typeof captureArticle; allowedOrigins?: string[];allowedHosts?:string[];accessToken?:string;secureCookie?:boolean; productions?: ProductionService; planner?: AutomaticPlanner; generation?: GenerationQueue; review?: PostgresReviewWorkflow;operationalState?:()=>Promise<unknown>;prepareCorrection?:(id:string)=>Promise<void>;pipeline?:ProductionPipeline;calibration?:CalibrationService;readiness?:()=>Promise<unknown>;retentionPlan?:()=>Promise<unknown> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
   const allowedOrigins = options.allowedOrigins ?? ['http://127.0.0.1:5173','http://localhost:5173'];
   const telemetry=new OperationalTelemetry();
@@ -57,6 +57,28 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
     reply.code(status).send(ErrorSchema.parse({ code, message, retryable: false, correlation_id: `request_${request.id}`, issues: [] }));
   });
   app.get('/health', async () => ({ status: 'ok', contract_version: CONTRACT_VERSION }));
+  if(options.readiness)app.get('/api/readiness',async()=>options.readiness!());
+  if(options.retentionPlan)app.get('/api/retention/plan',async()=>options.retentionPlan!());
+  if(options.calibration){const calibration=options.calibration;
+    const evidenceAction=async<T>(run:()=>Promise<T>)=>{try{return await run();}catch(error){if(error instanceof z.ZodError)throw error;throw new ApplicationError('ineligible','Evidência de calibração incompatível, insuficiente ou alterada.');}};
+    app.get('/api/calibration/reports',async request=>{const query=z.strictObject({profile_id:IdSchema,profile_version:z.coerce.number().int().positive(),minimum_samples:z.coerce.number().int().min(1).max(10000),approval_rate:z.coerce.number().min(0).max(1)}).parse(request.query);
+      return evidenceAction(()=>calibration.report({id:query.profile_id,version:query.profile_version},{minimum_samples:query.minimum_samples,approval_rate:query.approval_rate}));});
+    app.post('/api/calibration/observations',async request=>evidenceAction(()=>calibration.append(request.body)));
+    app.post('/api/calibration/decisions',async request=>evidenceAction(()=>calibration.decide(request.body)));
+  }
+  if(options.pipeline){const pipeline=options.pipeline;
+    const pipelineCommand=(id:string,raw:unknown)=>{const parsed=z.object({production:z.object({id:IdSchema})}).passthrough().parse(raw);if(parsed.production.id!==id)throw new ApplicationError('validation','Comando aponta para outra produção.');return raw;};
+    app.post('/api/productions/:id/generation/start',async request=>{const{id}=routeParams.parse(request.params);return pipeline.start(pipelineCommand(id,request.body));});
+    app.get('/api/productions/:id/candidates',async request=>pipeline.candidates(routeParams.parse(request.params).id));
+    app.post('/api/productions/:id/candidates/evaluate',async request=>{const{id}=routeParams.parse(request.params);return pipeline.evaluate(pipelineCommand(id,request.body));});
+    app.post('/api/productions/:id/candidates/retry',async request=>{const{id}=routeParams.parse(request.params);return pipeline.retry(pipelineCommand(id,request.body));});
+    app.get('/api/productions/:id/candidates/:assetId',async(request,reply)=>{
+      const{id,assetId}=z.strictObject({id:IdSchema,assetId:IdSchema}).parse(request.params),query=z.strictObject({version:z.coerce.number().int().positive()}).parse(request.query);
+      const asset=await pipeline.candidateFile(id,{id:assetId,version:query.version});reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff').type(asset.mime_type).header('Accept-Ranges','bytes');
+      let range;try{range=parseMediaRange(request.headers.range,asset.bytes.length);}catch{return reply.code(416).header('Content-Range',`bytes */${asset.bytes.length}`).send();}
+      return range?reply.code(206).header('Content-Range',`bytes ${range.start}-${range.end}/${asset.bytes.length}`).send(Buffer.from(asset.bytes.subarray(range.start,range.end+1))):reply.send(Buffer.from(asset.bytes));
+    });
+  }
   if(options.review) {
     const review=options.review;
     const ownCommand=(id:string,raw:unknown)=>{
@@ -100,7 +122,8 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
       const {id}=routeParams.parse(request.params);return CorrectionSchema.parse(await review.authorizeCorrection(ownCommand(id,request.body)));
     });
     app.post('/api/productions/:id/review/corrections/execute',async request=>{
-      const {id}=routeParams.parse(request.params);return CorrectionSchema.parse(await review.executeCorrection(ownCommand(id,request.body)));
+      const {id}=routeParams.parse(request.params);const result=CorrectionSchema.parse(await review.executeCorrection(ownCommand(id,request.body)));
+      if(options.pipeline)await options.pipeline.advance(id);return result;
     });
     app.get('/api/productions/:id/delivery',async request=>DeliveryViewSchema.parse(await review.delivery(routeParams.parse(request.params).id)));
     app.post('/api/productions/:id/delivery/export',async request=>{

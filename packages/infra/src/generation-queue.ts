@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { GenerationIntentSchema, GenerationExecutionSchema, ProductionSchema, ProductionSnapshotSchema,
-  JobSchema, type GenerationExecution, type GenerationQueue, type Production,type GenerationAdmission } from '@fbr/contracts';
+  JobSchema, type GenerationExecution, type GenerationQueue, type Production,type GenerationAdmission,type Job } from '@fbr/contracts';
 import { ApplicationError, budgetPreflight, canonical, sha256 } from '@fbr/domain';
 import type { SqlClient, SqlDatabase } from './configuration-store.js';
 
-const terminal = (state: GenerationExecution['state']) => ['succeeded', 'failed', 'cancelled'].includes(state);
+const terminal = (state:string) => ['succeeded', 'failed', 'cancelled'].includes(state);
 async function executions(client: SqlClient, productionId: string) {
   const result = await client.query('SELECT r.record FROM generation_revisions r JOIN generation_heads h USING(id,version) WHERE h.production_id=$1 ORDER BY h.id', [productionId]);
   return result.rows.map(row => GenerationExecutionSchema.parse(row.record));
@@ -35,7 +35,9 @@ async function updateCosts(client: SqlClient, production: Production) {
   const issues=production.pending_issues.filter(issue=>issue.code!=='budget_reconciliation_overrun');
   if(overrun)issues.push({code:'budget_reconciliation_overrun',message:'Cobrança ou reserva reconciliada ultrapassa o saldo seguro do orçamento.',next_action:'Conferir lançamentos e limite antes de novos trabalhos ou entrega.',required:true});
   const record = ProductionSchema.parse({ ...production, costs, version: production.version + 1, created_at: at,
-    pending_issues:issues,...(overrun&&['approved','exported'].includes(production.status)?{status:'awaiting_decision',current_approval:null}:{}),
+    pending_issues:issues,...(overrun&&['approved','exported'].includes(production.status)?{status:'ready_for_review',stage:'review',current_approval:null}:{}),
+    ...(!issues.length&&production.status==='awaiting_decision'&&production.pending_issues.some(i=>i.code==='budget_reconciliation_overrun')?
+      {status:production.current_render?'ready_for_review':production.stage==='generation'?'producing':'preparing',...(production.current_render?{stage:'review'}:{})}:{}),
     changes: [...production.changes, { at, author: 'generation_queue', reason: message }] });
   await client.query('INSERT INTO production_revisions(id,version,record) VALUES($1,$2,$3::jsonb)', [record.id, record.version, JSON.stringify(record)]);
   await client.query('UPDATE production_heads SET version=$2 WHERE id=$1', [record.id, record.version]);
@@ -132,20 +134,22 @@ export class PostgresGenerationQueue implements GenerationQueue {
   private checkLease(current: GenerationExecution, token: string) {
     if (!current.lease_token || current.lease_token !== token) throw new ApplicationError('conflict', 'Worker perdeu a posse desta execução.');
   }
+  private validateResult(current:GenerationExecution,job:Job){
+    const request=current.intent.request;
+    if(job.execution_key!==request.execution_key||job.attempt!==request.attempt
+      ||canonical(job.production)!==canonical(request.production)||job.configuration_hash!==request.configuration_hash
+      ||job.stage!==request.operation||job.costs.currency!==request.currency||canonical(job.sent_parameters)!==canonical(request.parameters)
+      ||canonical(job.inputs)!==canonical(request.input_assets)||(current.provider_job&&(current.provider_job.id!==job.id||current.provider_job.external_job_id!==job.external_job_id)))
+      throw new ApplicationError('conflict','Resultado não pertence à intenção persistida.');
+    if(current.provider_job&&job.version<current.provider_job.version)throw new ApplicationError('conflict','Resultado externo desatualizado.');
+    if(current.provider_job&&job.version===current.provider_job.version&&canonical(job)!==canonical(current.provider_job))
+      throw new ApplicationError('conflict','Mesma revisão externa com dados divergentes.');
+  }
   async complete(id: string, token: string, raw: unknown) {
     const job = JobSchema.parse(raw);
     return (await this.change(id, async (_client, current) => {
       this.checkLease(current, token);
-      const request = current.intent.request;
-      if (job.execution_key !== request.execution_key || job.attempt !== request.attempt || job.production.id !== request.production.id
-        || job.production.version !== request.production.version || job.configuration_hash !== request.configuration_hash
-        || job.stage !== request.operation || job.costs.currency !== request.currency
-        || canonical(job.sent_parameters) !== canonical(request.parameters) || canonical(job.inputs) !== canonical(request.input_assets)
-        || (current.provider_job && (current.provider_job.id !== job.id || current.provider_job.external_job_id !== job.external_job_id)))
-        throw new ApplicationError('conflict', 'Resultado não pertence à intenção persistida.');
-      if (current.provider_job && job.version < current.provider_job.version) throw new ApplicationError('conflict', 'Resultado externo desatualizado.');
-      if (current.provider_job && job.version === current.provider_job.version && canonical(job) !== canonical(current.provider_job))
-        throw new ApplicationError('conflict', 'Mesma revisão externa com dados divergentes.');
+      const request = current.intent.request;this.validateResult(current,job);
       const done = ['succeeded', 'failed', 'cancelled'].includes(job.status);
       const knownCost = job.costs.confirmed_minor !== null;
       const state = done && knownCost ? job.status as GenerationExecution['state']
@@ -156,6 +160,24 @@ export class PostgresGenerationQueue implements GenerationQueue {
         diagnostic: state === 'unknown' ? 'Resultado ou cobrança incertos; reserva conservada.' : null,
         lease_token: null, lease_until: null };
     }))!;
+  }
+  /** Internal authenticated adapter reconciliation only; never expose rawJob as an operator billing command. */
+  async reconcileBilling(id:string,rawJob:unknown){
+    const job=JobSchema.parse(rawJob);
+    const result=await this.change(id,async(_client,current)=>{
+      this.validateResult(current,job);const previous=current.provider_job;
+      if(!previous||!terminal(previous.status)||(!terminal(current.state)&&current.state!=='unknown')||current.lease_token)
+        throw new ApplicationError('conflict','Cobrança exige resultado terminal sem worker concorrente.');
+      if(job.costs.confirmed_minor===null)throw new ApplicationError('provider_unknown','Cobrança ainda não confirmada pelo fornecedor.');
+      const {version:_priorVersion,changes:_priorChanges,costs:priorCosts,...priorContent}=previous;
+      const {version:_newVersion,changes:_newChanges,costs:newCosts,...newContent}=job;
+      if(canonical(priorContent)!==canonical(newContent)||priorCosts.currency!==newCosts.currency
+        ||priorCosts.estimated_minor!==newCosts.estimated_minor||priorCosts.committed_minor!==newCosts.committed_minor)
+        throw new ApplicationError('conflict','Reconciliação de cobrança não pode mudar o output ou a intenção.');
+      if(job.version===previous.version)return null;
+      return {...current,provider_job:job,state:job.status as GenerationExecution['state'],reserved_minor:0,
+        confirmed_minor:job.costs.confirmed_minor,diagnostic:null,lease_token:null,lease_until:null};
+    });return result??(await this.get(id))!;
   }
   async uncertain(id: string, token: string, diagnostic: string) {
     return (await this.change(id, async (_client, current) => {

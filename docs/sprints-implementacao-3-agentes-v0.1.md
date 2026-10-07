@@ -1,5 +1,7 @@
 # FBR Videos — sprints para implementação por três agentes
 
+Auditoria e próxima execução em 6/10/2026: [tasklist remanescente](tasklist-remanescente-2026-10-06.md), com 18 tarefas de código e quatro grupos de dependências externas. Orquestração inicial, normalização dos adapters e integração de outputs/correções ainda estão abertas; as fundações entregues devem ser preservadas.
+
 Estado de execução atualizado em 6/10/2026: [continuação autônoma e provisionamento de S2–S6](arquitetura/continuacao-sprints-autonomas-2026-10-06.md). As dependências externas não bloqueiam as frentes internas; aceite integral das sprints continua distinto da entrega técnica.
 
 Revisão de planejamento · 4 de outubro de 2026: [integração Higgsfield](arquitetura/integracao-higgsfield-v0.1.md). Higgsfield é candidata a imagens e cenas de apoio; voz oficial e avatar seguem rotas separadas. Stack e jornada artigo + perfil preservadas. Acesso, qualidade e custos reais continuam não testados; esta revisão não conclui gates.

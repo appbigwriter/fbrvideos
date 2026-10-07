@@ -39,6 +39,10 @@ test('FFmpeg produz preview real sintético íntegro, com uma trilha de áudio e
     const faded=await renderLocalPreview(dossier,divided,store);assert.equal(await store.exists(faded),true);
     await assert.rejects(renderLocalPreview(dossier,{...divided,transitions:[{at_seconds:0.1,type:'fade',duration_seconds:0.05}]},store),/transition_unsupported/);
     await assert.rejects(renderLocalPreview(dossier, { ...timeline, video: timeline.video.map(v => ({ ...v, clip_audio: 'official_audio' })) }, store), /duplicate_audio/);
+    const forgedDuration = structuredClone(dossier); forgedDuration.assets.find(asset => asset.type === 'audio')!.file.duration_seconds = 0.5;
+    await assert.rejects(renderLocalPreview(forgedDuration, timeline, store), /input_measurement_mismatch/);
+    const forgedMime = structuredClone(dossier); forgedMime.assets.find(asset => asset.type === 'image')!.file.mime_type = 'image/jpeg';
+    await assert.rejects(renderLocalPreview(forgedMime, timeline, store), /input_measurement_mismatch/);
     const missing = structuredClone(dossier); missing.assets.find(a => a.type === 'audio')!.file.storage_key = 'missing.wav';
     await assert.rejects(renderLocalPreview(missing, timeline, store), /missing_or_corrupt/);
   } finally {

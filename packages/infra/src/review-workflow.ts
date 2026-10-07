@@ -9,6 +9,9 @@ import type { SqlClient, SqlDatabase } from './configuration-store.js';
 import { storeDeliveryManifest } from './delivery-store.js';
 import {PostgresMediaStore,type MediaWrite} from './media-store.js';
 import {PostgresGenerationQueue} from './generation-queue.js';
+import {belongsToExecution} from './asset-provenance.js';
+import {audioSpecificationMatches} from '@fbr/pipeline';
+import type {SourceReauditor} from './source-reaudit.js';
 
 const mediaSchemas = { asset: AssetSchema, evaluation: EvaluationSchema, approval: ApprovalSchema };
 async function production(client: SqlClient, id: string, lock = false) {
@@ -54,7 +57,7 @@ const subtitleRefs=(d:Dossier)=>d.assets.filter(asset=>asset.type==='subtitle'&&
   &&!['outdated','rejected'].includes(asset.status)).map(asset=>({id:asset.id,version:asset.version}));
 
 export class PostgresReviewWorkflow {
-  constructor(private readonly db: SqlDatabase, private readonly files: AssetStore,private readonly admission?:GenerationAdmission) {}
+  constructor(private readonly db: SqlDatabase, private readonly files: AssetStore,private readonly admission?:GenerationAdmission,private readonly sourceReauditor?:SourceReauditor) {}
   private async render(client: SqlClient,p: Production,d: Dossier|null, ref=p.current_render): Promise<Asset|null> {
     if(!ref||!d?.timeline) return null;
     const row=(await client.query(`SELECT r.record FROM media_revisions r JOIN media_heads h USING(kind,id)
@@ -121,7 +124,7 @@ export class PostgresReviewWorkflow {
     const request=ApprovePlanningSchema.parse(raw);
     return ProductionSchema.parse(await this.command(request.command_id,request,'approve_planning',async(client,p)=>{
       const d=await dossier(client,p);
-      if(!d||!sameRef(d,request.dossier)||p.status!=='awaiting_decision'||d.assets.length||d.jobs.length||d.pending_issues.some(issue=>issue.required)
+      if(!d||!sameRef(d,request.dossier)||p.status!=='awaiting_decision'||d.assets.length||d.jobs.length||d.pending_issues.some(issue=>issue.required&&issue.code!=='editorial_review_required')
         ||d.approvals.some(approval=>approval.kind==='editorial'&&approval.status==='active'))throw new ApplicationError('ineligible','Aprovação exige planejamento atual, sem geração e com pendências resolvidas.');
       const snapshot=ProductionSnapshotSchema.parse((await client.query('SELECT record FROM production_snapshots WHERE production_id=$1',[p.id])).rows[0]?.record),{hash,...body}=snapshot;
       if(hash!==sha256(canonical(body))||snapshot.production_id!==p.id||inspectDossier(d,snapshot.article,snapshot.profile).some(issue=>issue.required))
@@ -132,10 +135,10 @@ export class PostgresReviewWorkflow {
           {name:'Direção e referências',mandatory:true,result:'pass',evidence:'Operador declarou revisão da intenção e direção das cenas indicadas.',timecode_seconds:null,corrective_action:null}]});
       const approvals=['editorial','direction'].map(kind=>ApprovalSchema.parse({id:randomUUID(),version:1,created_at:at,author:'local_operator',changes:[],status:'active',target,
         kind,reviewer:'local_operator',method:'human',reviewed_in_full:true,evaluation_refs:[{id:evaluationId,version:1}]}));
-      const next=DossierSchema.parse({...d,version:target.version,created_at:at,status:'ready',evaluations:[...d.evaluations,evaluation],approvals:[...d.approvals,...approvals]});
+      const next=DossierSchema.parse({...d,version:target.version,created_at:at,status:'ready',pending_issues:d.pending_issues.filter(issue=>issue.code!=='editorial_review_required'),evaluations:[...d.evaluations,evaluation],approvals:[...d.approvals,...approvals]});
       await client.query('INSERT INTO production_dossiers(id,version,record) VALUES($1,$2,$3::jsonb)',[next.id,next.version,JSON.stringify(next)]);
       await saveMedia(client,p.id,'evaluation',evaluation,null);for(const approval of approvals)await saveMedia(client,p.id,'approval',approval,null);
-      return appendProduction(client,p,{dossier:target,pending_issues:[...p.pending_issues.filter(issue=>!['audiovisual_gate_pending','provider_setup_pending','planning_review_pending'].includes(issue.code)),
+      return appendProduction(client,p,{dossier:target,pending_issues:[...p.pending_issues.filter(issue=>!['audiovisual_gate_pending','provider_setup_pending','planning_review_pending','editorial_review_required'].includes(issue.code)),
         {code:'provider_setup_pending',message:'Planejamento aprovado; conexões de geração e custo ainda precisam estar liberadas.',next_action:'Configurar adapters, acesso e estimativas no servidor antes de iniciar mídia.',required:true}]},
         'planning_approved','Revisão humana do roteiro e direção registrada; aprovação não autoriza gasto desconhecido.');
     }));
@@ -155,6 +158,12 @@ export class PostgresReviewWorkflow {
   }
   async editSpeech(raw:unknown){
     const request=EditSpeechSchema.parse(raw);
+    const replay=(await this.db.query('SELECT fingerprint,result FROM review_commands WHERE command_id=$1',[request.command_id])).rows[0];
+    if(replay){if(replay.fingerprint!==sha256(canonical({action:'edit_speech',raw:request})))throw new ApplicationError('conflict','Comando reutilizado com outra intenção.');return ProductionSchema.parse(replay.result);}
+    const sourceProduction=await production(this.db,request.production.id),sourceDossier=await dossier(this.db,sourceProduction);
+    if(!sourceDossier||!sameRef(sourceProduction,request.production)||!sameRef(sourceDossier,request.dossier))throw new ApplicationError('conflict','Fonte da edição alterada.');
+    const sourceSnapshot=ProductionSnapshotSchema.parse((await this.db.query('SELECT record FROM production_snapshots WHERE production_id=$1',[sourceProduction.id])).rows[0]?.record);
+    const sourceAudit=await this.sourceReauditor?.audit({command_id:request.command_id,production:request.production,dossier:sourceDossier,snapshot:sourceSnapshot,speech_id:request.speech_id,text:request.text});
     return ProductionSchema.parse(await this.command(request.command_id,request,'edit_speech',async(client,p)=>{
       const d=await dossier(client,p);
       const planning=p.status==='awaiting_decision'&&d&&!d.assets.length&&!d.jobs.length;
@@ -171,6 +180,11 @@ export class PostgresReviewWorkflow {
       const sourceErrors=inspectDossier(edited,snapshot.article,snapshot.profile).filter(issue=>['source_missing','editorial_source_unapproved','article_revision_mismatch','profile_revision_mismatch','character_revision_mismatch'].includes(issue.code));
       if(sourceErrors.length)throw new ApplicationError('ineligible','Fontes da nova fala precisam de revisão válida antes de persistir.');
       const next=invalidateDossier(edited,[{id:d.id,version:d.version}]),at=new Date().toISOString();
+      if(sourceAudit){
+        if(sourceAudit.snapshot_hash!==snapshot.hash||!sameRef(sourceAudit.dossier,d)||!sameRef(sourceAudit.production,p)||sourceAudit.edited_text_hash!==sha256(request.text))throw new ApplicationError('conflict','Evidência semântica não corresponde à edição atual.');
+        next.pending_issues=[...next.pending_issues.filter(issue=>!issue.code.includes('source_reaudit')), ...sourceAudit.issues];
+        await client.query('INSERT INTO source_edit_audits(command_id,production_id,record) VALUES($1,$2,$3::jsonb)',[request.command_id,p.id,JSON.stringify(sourceAudit)]);
+      }
       if(planning){next.status='specified';next.pending_issues=next.pending_issues.filter(issue=>issue.code!=='correction_dependencies_outdated');}
       next.changes.push({at,author:'local_operator',reason:`${request.reason}; operador declarou conferência das fontes preservadas da fala ${speech.id}.`});
       const writes:MediaWrite[]=[];
@@ -397,7 +411,7 @@ export class PostgresReviewWorkflow {
       const jobs=(await client.query('SELECT r.record FROM generation_revisions r JOIN generation_heads h USING(id,version) WHERE h.production_id=$1',[p.id])).rows.map(row=>GenerationExecutionSchema.parse(row.record)),
         plans=(await client.query('SELECT record FROM correction_execution_plans WHERE correction_id=$1 AND production_id=$2',[correction.id,p.id])).rows;
       const keys=new Set(plans.flatMap(row=>CorrectionExecutionPlanSchema.parse(row.record).intents.map(intent=>intent.request.execution_key)));
-      const executions=jobs.filter(job=>keys.has(job.intent.request.execution_key));
+      const executions=[...keys].map(key=>jobs.filter(job=>job.intent.request.execution_key===key).sort((a,b)=>b.intent.request.attempt-a.intent.request.attempt)[0]!).filter(Boolean);
       if(executions.length!==keys.size||executions.some(job=>job.state!=='succeeded'||!job.provider_job||job.provider_job.costs.confirmed_minor===null))
         throw new ApplicationError('ineligible','Todos os resultados do plano precisam estar concluídos e reconciliados.');
       if(new Set(request.replacements.map(pair=>pair.previous.id)).size!==request.replacements.length||new Set(request.replacements.map(pair=>pair.next.id)).size!==request.replacements.length)
@@ -410,15 +424,16 @@ export class PostgresReviewWorkflow {
         if(!row)throw new ApplicationError('ineligible','Output não pertence à produção ou está desatualizado.');
         const asset=AssetSchema.parse(row.record);
         if(asset.status!=='approved'||asset.usage.permission!=='allowed'||asset.type!==old.type||!await this.files.exists(asset)
-          ||!asset.execution||!executions.some(job=>job.provider_job&&sameRef(job.provider_job,asset.execution!)&&asset.configuration_hash===job.intent.request.configuration_hash
-            &&job.provider_job.output_assets.some(ref=>sameRef(ref,asset))))
+          ||!asset.execution||!(await Promise.all(executions.map(job=>belongsToExecution(client,p.id,asset,job)))).some(Boolean))
           throw new ApplicationError('ineligible','Output exige arquivo íntegro, avaliação e proveniência do plano exato.');
         const shot=d.shots.find(shot=>shot.id===old.specification.id);
-        if(asset.type==='audio'?!sameRef(asset.specification,{id:d.id,version:d.version+1}):!shot||!sameRef(asset.specification,shot))
+        const original=asset.type==='audio'?(await client.query('SELECT record FROM production_dossiers WHERE id=$1 AND version=$2',[asset.specification.id,asset.specification.version])).rows[0]:null;
+        if(asset.type==='audio'?!audioSpecificationMatches(asset,d,original?[DossierSchema.parse(original.record)]:[]):!shot||!sameRef(asset.specification,shot))
           throw new ApplicationError('ineligible','Output não corresponde à fala/plano que será montado.');
         replacements.set(old.id,asset);
       }
-      const assets=d.assets.filter(asset=>!(['render','subtitle'].includes(asset.type)&&asset.status==='outdated')).map(asset=>replacements.get(asset.id)??asset);
+      const outputIds=new Set([...replacements.values()].map(asset=>asset.id));
+      const assets=d.assets.filter(asset=>!outputIds.has(asset.id)&&!(['render','subtitle'].includes(asset.type)&&asset.status==='outdated')).map(asset=>replacements.get(asset.id)??asset);
       if(assets.some(asset=>['audio','image','clip'].includes(asset.type)&&asset.status==='outdated'))throw new ApplicationError('ineligible','Ainda há inputs invalidados sem substituição.');
       const at=new Date().toISOString(),next=DossierSchema.parse({...d,version:d.version+1,created_at:at,status:'ready',timeline:null,assets,
         jobs:[...d.jobs.filter(job=>!executions.some(execution=>execution.provider_job?.id===job.id)),...executions.map(execution=>execution.provider_job!)],
