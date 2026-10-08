@@ -2,7 +2,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import type {SqlDatabase} from './configuration-store.js';
 const execute=promisify(execFile);
-const requiredTables=['configuration_heads','production_heads','generation_heads','media_heads','assembly_runs','provider_http_intents','calibration_observations','calibration_profile_decisions'];
+const requiredTables=['configuration_heads','production_heads','generation_heads','media_heads','assembly_runs','provider_http_intents','calibration_observations','calibration_profile_decisions','provider_normalized_receipts','provider_quotes','pipeline_commands','source_edit_audits','production_budget_commands','assembly_evidence','generation_polls','operational_samples'];
 /** Checks operacionais sanitizados; liveness de processo é independente de readiness. */
 export async function operationalReadiness(db:SqlDatabase,probeRenderer=true){
  const checks:{component:string;ready:boolean;diagnostic:string|null}[]=[];

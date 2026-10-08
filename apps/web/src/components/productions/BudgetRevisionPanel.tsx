@@ -15,6 +15,7 @@ export function budgetRevision(production:Production,fields:{ceiling:string;reas
  if(!fields.reviewed)throw new Error('Confira o limite, a moeda e a evidência antes de registrar.');
  if(!fields.reason.trim()||!fields.source.trim()||!fields.evidence.trim())throw new Error('Informe motivo, origem da autorização e evidência.');
  const ceiling=decimalToMinor(fields.ceiling,production.costs.currency);
+ if(ceiling<=production.costs.ceiling_minor)throw new Error('Informe um aumento explícito em relação ao limite atual.');
  if(ceiling<production.costs.confirmed_minor+production.costs.committed_minor+production.costs.safety_margin_minor)throw new Error('O limite precisa cobrir custo confirmado, reserva e margem de segurança.');
  return{production:{id:production.id,version:production.version},currency:production.costs.currency,ceiling_minor:ceiling,reason:fields.reason.trim(),source:fields.source.trim(),evidence:fields.evidence.trim(),reviewed:true as const};
 }
@@ -23,8 +24,9 @@ export function BudgetRevisionPanel({production,onSaved}:{production:Production;
  return <section aria-label="Limite de orçamento"><h2>Orçamento da produção</h2>
   <p>Limite atual: {minorLabel(production.costs.ceiling_minor,production.costs.currency)}. Margem de segurança: {minorLabel(production.costs.safety_margin_minor,production.costs.currency)}.</p>
   <p>Confirmado: {minorLabel(production.costs.confirmed_minor,production.costs.currency)} · Reservado: {minorLabel(production.costs.committed_minor,production.costs.currency)}.</p>
-  <details><summary>Registrar alteração explícita do limite</summary><form className="connected-form" onSubmit={event=>{event.preventDefault();try{const body=budgetRevision(production,{ceiling,reason,source,evidence,reviewed});setError(null);void command.run(`/productions/${encodeURIComponent(production.id)}/budget`,ProductionSchema,body,()=>{setSaved(true);setReviewed(false);onSaved();});}catch(error){setError(error instanceof Error?error.message:'Confira os campos do orçamento.');}}}>
+  <details><summary>Registrar aumento explícito do limite</summary><form className="connected-form" onSubmit={event=>{event.preventDefault();try{const body=budgetRevision(production,{ceiling,reason,source,evidence,reviewed});setError(null);void command.run(`/productions/${encodeURIComponent(production.id)}/budget`,ProductionSchema,body,()=>{setSaved(true);setReviewed(false);onSaved();});}catch(error){setError(error instanceof Error?error.message:'Confira os campos do orçamento.');}}}>
    <p>Alterar o teto exige autorização registrada. A moeda permanece {production.costs.currency}; este formulário não converte valores nem comprova acesso ao fornecedor.</p>
+   <p>Se o orçamento for a única pendência, registrar o aumento poderá retomar a execução e permitir novos envios dentro do teto autorizado.</p>
    <label>Novo limite em {production.costs.currency}<input inputMode="decimal" value={ceiling} onChange={event=>{setCeiling(event.target.value);setReviewed(false);}} required placeholder={currencyDecimals(production.costs.currency)?'Ex.: 120,00':'Ex.: 120'}/></label>
    <label>Motivo da alteração<textarea value={reason} onChange={event=>{setReason(event.target.value);setReviewed(false);}} required/></label>
    <label>Origem da autorização<input value={source} onChange={event=>{setSource(event.target.value);setReviewed(false);}} required/></label>

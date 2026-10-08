@@ -3,7 +3,8 @@ import {z} from 'zod';
 import {IdSchema,VersionRefSchema,ProductionSchema,ProductionSnapshotSchema,DossierSchema,ApprovalSchema,CorrectionSchema,TimelineSchema,
   type AssetStore,type Production} from '@fbr/contracts';
 import {ApplicationError,canonical,sha256,sameRef} from '@fbr/domain';
-import {assembleTimeline,type AssemblyBindings} from '@fbr/pipeline';
+import {assembleTimeline,type AssemblyBindings,type SubtitleAligner,type SubtitleLayout} from '@fbr/pipeline';
+import {inspectAudioMix,type AudioMixPolicy} from './media-quality.js';
 import {PostgresMediaStore} from './media-store.js';
 import {renderLocalPreview,type RenderExecutables} from './local-renderer.js';
 import type {SqlDatabase} from './configuration-store.js';
@@ -14,10 +15,15 @@ const requestSchema=z.strictObject({command_id:IdSchema,production:VersionRefSch
   music:TimelineSchema.shape.music.optional(),transitions:TimelineSchema.shape.transitions.optional(),
 })});
 /** Entrada interna do pipeline: o operador continua selecionando artigo/perfil, sem montar bindings. */
+export interface AssemblyQualityOptions{aligner?:SubtitleAligner;subtitle_layout?:SubtitleLayout;require_word_timings?:boolean;audio_mix?:AudioMixPolicy}
+export function assemblyQualityConfiguration(quality:AssemblyQualityOptions){return{word_timings:quality.require_word_timings??false,
+  aligner:quality.aligner?.version??null,layout:quality.subtitle_layout??null,mix:quality.audio_mix??null};}
+export function assemblyQualityFingerprint(quality:AssemblyQualityOptions){return sha256(canonical(assemblyQualityConfiguration(quality)));}
 export class LocalAssemblyService{
-  constructor(private readonly db:SqlDatabase,private readonly files:AssetStore,private readonly tools?:RenderExecutables){}
+  constructor(private readonly db:SqlDatabase,private readonly files:AssetStore,private readonly tools?:RenderExecutables,private readonly quality:AssemblyQualityOptions={}){}
   async assemble(raw:unknown):Promise<Production>{
-    const request=requestSchema.parse(raw),fingerprint=sha256(canonical(request)),token=randomUUID();
+    const qualityConfiguration=assemblyQualityConfiguration(this.quality),qualityHash=assemblyQualityFingerprint(this.quality);
+    const request=requestSchema.parse(raw),fingerprint=sha256(canonical({request,quality:qualityConfiguration})),token=randomUUID();
     const claimed=await this.db.transaction(async client=>{
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[request.command_id]);
       const existing=(await client.query('SELECT fingerprint,state,result FROM assembly_runs WHERE command_id=$1',[request.command_id])).rows[0];
@@ -61,9 +67,29 @@ export class LocalAssemblyService{
     });
     if('result'in claimed)return claimed.result;
     const heartbeat=setInterval(()=>{void this.db.query("UPDATE assembly_runs SET heartbeat_at=CURRENT_TIMESTAMP WHERE command_id=$1 AND state='running' AND lease_token=$2",[request.command_id,token]).catch(()=>{});},30000);heartbeat.unref();
+    let qualityPhase:'alignment'|'mix'|null=null,evidenceSaved=false,renderHash:string|null=null;
+    let alignmentEvidence:AssemblyBindings['subtitle_alignment']|null=null;
     try{
-      const timeline=assembleTimeline(claimed.d,claimed.delivery,request.bindings as AssemblyBindings,claimed.previousDossiers);
+      const bindings:AssemblyBindings={audio:request.bindings.audio,video:request.bindings.video,...(request.bindings.music?{music:request.bindings.music}:{}),...(request.bindings.transitions?{transitions:request.bindings.transitions}:{})};
+      if(this.quality.require_word_timings||this.quality.aligner||this.quality.subtitle_layout)qualityPhase='alignment';
+      if(this.quality.require_word_timings&&!this.quality.aligner)throw new ApplicationError('ineligible','Perfil exige alinhamento observado de palavras ainda não configurado.');
+      if(this.quality.aligner){
+        if(!this.quality.subtitle_layout)throw new ApplicationError('ineligible','Layout das legendas ainda não configurado.');
+        const alignments=[];
+        for(const speech of claimed.d.blocks.flatMap(block=>block.speeches).filter(s=>s.mode!=='pause')){
+          const audioRef=bindings.audio.find(a=>a.speech_segment_id===speech.id)!.asset,audio=claimed.d.assets.find(a=>sameRef(a,audioRef))!;
+          alignments.push({speech_segment_id:speech.id,alignment:await this.quality.aligner.align({audio,text:speech.text,language:(await this.snapshotLanguage(claimed.p.id))})});
+        }bindings.subtitle_alignment=alignments;alignmentEvidence=alignments;
+      }
+      if(this.quality.subtitle_layout)bindings.subtitle_layout=this.quality.subtitle_layout;
+      const timeline=assembleTimeline(claimed.d,claimed.delivery,bindings,claimed.previousDossiers);
+      qualityPhase=null;
       const render=await renderLocalPreview(claimed.d,timeline,this.files,this.tools,claimed.previousDossiers);
+      renderHash=render.file.hash;if(this.quality.audio_mix)qualityPhase='mix';
+      const mix=this.quality.audio_mix?await inspectAudioMix(await this.files.read(render.file.storage_key),this.quality.audio_mix):null;
+      if(mix||bindings.subtitle_alignment||bindings.subtitle_layout){await this.db.query('INSERT INTO assembly_evidence(command_id,production_id,record) VALUES($1,$2,$3::jsonb) ON CONFLICT(command_id) DO NOTHING',[request.command_id,claimed.p.id,JSON.stringify({production_version:claimed.p.version,dossier:{id:claimed.d.id,version:claimed.d.version},quality_hash:qualityHash,quality_configuration:qualityConfiguration,status:mix&&mix.status!=='passed'?'failed':'passed',failure_code:mix&&mix.status!=='passed'?'assembly_quality_audio_mix_failed':null,render_hash:render.file.hash,audio_mix_policy:this.quality.audio_mix??null,mix,subtitle_alignment:bindings.subtitle_alignment??null,subtitle_layout:bindings.subtitle_layout??null})]);evidenceSaved=true;}
+      if(mix&&mix.status!=='passed')throw new ApplicationError('ineligible','Mixagem não atende à política configurada; evidência técnica registrada.');
+      qualityPhase=null;
       const subtitles=await storeTimelineSubtitles(this.files,{...timeline,status:'rendered'});
       return await this.db.transaction(async client=>{
         const run=(await client.query('SELECT state,lease_token FROM assembly_runs WHERE command_id=$1 FOR UPDATE',[request.command_id])).rows[0];
@@ -101,7 +127,9 @@ export class LocalAssemblyService{
         return p;
       });
     }catch(error){
-      await this.db.query("UPDATE assembly_runs SET state='failed',diagnostic='local_assembly_failed' WHERE command_id=$1 AND state='running' AND lease_token=$2",[request.command_id,token]);
+      const diagnostic=qualityPhase==='alignment'?'assembly_quality_subtitle_alignment_failed':qualityPhase==='mix'?'assembly_quality_audio_mix_failed':'local_assembly_failed';
+      if(qualityPhase&&!evidenceSaved)await this.db.query('INSERT INTO assembly_evidence(command_id,production_id,record) VALUES($1,$2,$3::jsonb) ON CONFLICT(command_id) DO NOTHING',[request.command_id,claimed.p.id,JSON.stringify({production_version:claimed.p.version,dossier:{id:claimed.d.id,version:claimed.d.version},quality_hash:qualityHash,quality_configuration:qualityConfiguration,status:'failed',failure_code:diagnostic,render_hash:renderHash,mix:null,subtitle_alignment:alignmentEvidence,subtitle_layout:this.quality.subtitle_layout??null})]);
+      await this.db.query("UPDATE assembly_runs SET state='failed',diagnostic=$3 WHERE command_id=$1 AND state='running' AND lease_token=$2",[request.command_id,token,diagnostic]);
       throw error;
     }finally{clearInterval(heartbeat);}
   }
@@ -109,4 +137,5 @@ export class LocalAssemblyService{
     const result=await this.db.query("UPDATE assembly_runs SET state='failed',diagnostic='local_assembly_interrupted' WHERE state='running' AND heartbeat_at<CURRENT_TIMESTAMP-INTERVAL '3 minutes' RETURNING command_id");
     return result.rowCount??0;
   }
+  private async snapshotLanguage(id:string){return ProductionSnapshotSchema.parse((await this.db.query('SELECT record FROM production_snapshots WHERE production_id=$1',[id])).rows[0]?.record).profile.language;}
 }

@@ -13,16 +13,20 @@ export class GenerationWorker {
       throw new Error('generation_real_gate_pending');
     if (!capabilities.operations.includes(current.intent.request.operation) || !capabilities.can_query_job)
       throw new Error('generation_capability_missing');
+    const found=current.state==='unknown'&&!current.provider_job?.external_job_id&&adapter.lookupReceipt
+      ?await adapter.lookupReceipt(current.intent.request):null;
+    const receipt=found?AdapterResultSchema.parse(found):null;
+    if(receipt&&(receipt.outcome!=='accepted'||!receipt.job.external_job_id))throw new Error('generation_receipt_lookup_invalid');
     const recovery=current.state==='unknown'&&!current.provider_job?.external_job_id&&capabilities.supports_idempotent_recovery&&!!adapter.recover;
-    const claimed = await this.queue.claim(id,60,recovery);
+    const claimed = await this.queue.claim(id,60,recovery||!!receipt);
     if (!claimed?.lease_token) return claimed ?? current;
     const token = claimed.lease_token;
     try {
-      const response = AdapterResultSchema.parse(claimed.state === 'submitting'
+      const response = AdapterResultSchema.parse(receipt??(claimed.state === 'submitting'
         ? await adapter.submit(claimed.intent.request)
         : claimed.provider_job?.external_job_id ? await adapter.query(claimed.provider_job.external_job_id)
           : recovery&&adapter.recover?await adapter.recover(claimed.intent.request)
-          : (() => { throw new Error('generation_external_id_missing'); })());
+          : (() => { throw new Error('generation_external_id_missing'); })()));
       if (response.outcome === 'blocked') return await this.queue.uncertain(id, token, response.error.code);
       return await this.queue.complete(id, token, response.job);
     } catch (error) {

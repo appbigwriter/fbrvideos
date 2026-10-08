@@ -14,6 +14,7 @@ export interface ProviderRuntime{
   pipeline?:ProductionPipeline;
   recover?():Promise<unknown>;
   canExecute?(execution:GenerationExecution):Promise<boolean>;
+  receiveCallback?(adapterId:string,body:unknown,headers:Readonly<Record<string,string|string[]|undefined>>):Promise<unknown>;
 }
 /** Ponto único de composição para adicionar APIs depois, sem mudar fila, custos ou contratos do domínio. */
 export async function loadProviderRuntime(path:string|undefined,context:{db:SqlDatabase;files:AssetStore}):Promise<ProviderRuntime|null>{
@@ -27,6 +28,7 @@ export async function loadProviderRuntime(path:string|undefined,context:{db:SqlD
   const runtime=await module.createProviderRuntime(context) as ProviderRuntime;
   if(!runtime||!(runtime.adapters instanceof Map)||typeof runtime.admission!=='function'||typeof runtime.admitReal!=='function'
     ||(runtime.prepareCorrection!==undefined&&typeof runtime.prepareCorrection!=='function')||(runtime.advance!==undefined&&typeof runtime.advance!=='function'))throw new Error('provider_runtime_invalid');
+  if((runtime.recover!==undefined&&typeof runtime.recover!=='function')||(runtime.canExecute!==undefined&&typeof runtime.canExecute!=='function')||(runtime.receiveCallback!==undefined&&typeof runtime.receiveCallback!=='function'))throw new Error('provider_runtime_invalid');
   if(runtime.files&&['read','exists','putImmutable'].some(method=>typeof runtime.files![method as keyof AssetStore]!=='function'))throw new Error('provider_runtime_asset_store_invalid');
   for(const [id,adapter]of runtime.adapters){
     if(!adapter||typeof adapter.submit!=='function'||typeof adapter.query!=='function'||typeof adapter.cancel!=='function')throw new Error('provider_runtime_adapter_invalid');

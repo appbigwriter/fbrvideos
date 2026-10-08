@@ -1,5 +1,7 @@
 # Continuação autônoma das sprints — 6 de outubro de 2026
 
+Continuação entregue em 7/10: [implementação da tasklist TL-01–TL-18](entrega-tasklist-2026-10-07.md). O registro abaixo conserva o estado anterior à integração completa; usar o adendo novo para operação e evidências atuais.
+
 Diretriz do responsável: implementar todas as frentes que podem ser realizadas no código e provisionar pontos de integração para adicionar APIs posteriormente. Dependências de conta, mídia real, decisões de infraestrutura externa e aceites humanos não bloqueiam o desenvolvimento interno.
 
 Este registro sucede `continuacao-s4-s5-2026-10-06.md`. Código provisionado não significa fornecedor conectado, mídia validada ou sprint com aceite humano integral.

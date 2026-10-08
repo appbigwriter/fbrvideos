@@ -1,12 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {getPipelineCatalog,SimulatedGenerationAdapter} from '@fbr/pipeline';
-import {sha256} from '@fbr/domain';
+import {sha256,canonical} from '@fbr/domain';
 import type {GenerationExecution} from '@fbr/contracts';
 import {createHiggsfieldAdapter,createHeygenAdapter,type ProviderReceiptStore,type ProviderReceiptRecord,type NormalizedProviderConfig} from '../src/normalized-provider-adapters.js';
 import {HiggsfieldClient} from '../src/higgsfield-client.js';
 import {HeygenClient} from '../src/heygen-client.js';
 import {providerQuoteRequestHash,validateProviderQuote} from '../src/provider-estimates.js';
+import type {HttpTransmissionJournal} from '../src/http-generation-adapter.js';
+class MemoryJournal implements HttpTransmissionJournal{
+  readonly records=new Map<string,unknown>();
+  async pin(adapter:string,req:Parameters<HttpTransmissionJournal['pin']>[1],payload:unknown){const key=`${adapter}:${req.execution_key}:${req.attempt}`,old=this.records.get(key);
+    if(old&&canonical(old)!==canonical(payload))throw new Error('provider_http_intention_changed');this.records.set(key,structuredClone(payload));}
+  async get(adapter:string,req:Parameters<HttpTransmissionJournal['pin']>[1]){return this.records.get(`${adapter}:${req.execution_key}:${req.attempt}`)??null;}
+}
 class MemoryReceipts implements ProviderReceiptStore {
   records=new Map<string,ProviderReceiptRecord>();
   async get(adapter:string,id:string){return this.records.get(`${adapter}:${id}`)??null;}
@@ -68,4 +75,36 @@ test('Provider quotes require exact request/account/currency and expire without 
   assert.throws(()=>validateProviderQuote(quote,intent,'account',new Date('2026-10-06T12:30:00Z')),/expired/);
   assert.throws(()=>validateProviderQuote({...quote,currency:'BRL'},intent,'account',new Date('2026-10-06T12:10:00Z')),/currency/);
   assert.throws(()=>validateProviderQuote(quote,{...intent,request:{...request,parameters:{prompt:'changed'}}},'account',new Date('2026-10-06T12:10:00Z')),/changed/);
+});
+test('Idempotent recovery replays pinned signed input URL byte-exact without signing/uploading again',async()=>{
+  const model=getPipelineCatalog().models.find(m=>m.id==='hf_seedance2_image_animation')!,caps=await new SimulatedGenerationAdapter('animation').capabilities();
+  const animation={...request,operation:'animation' as const,route:'animated_scene' as const,input_assets:[{id:'approved_image',version:2}],
+    parameters:{prompt:'Fixture animation',image_url:'https://storage.example/placeholder',duration:4,generate_audio:false}};
+  const bodies:string[]=[],keys:string[]=[];let signatures=0,boundaries=0;
+  const client=new HiggsfieldClient(()=> 'fixture-key',async(_url,init)=>{
+    bodies.push(String(init?.body));keys.push(new Headers(init?.headers).get('Idempotency-Key')!);
+    if(bodies.length===1)throw new Error('response lost after accepted send');
+    return new Response(JSON.stringify({request_id:'recovered_animation',status:'queued',status_url:'https://api.higgsfield.ai/status/recovered',cancel_url:'https://api.higgsfield.ai/cancel/recovered'}),{headers:{'Content-Type':'application/json'}});
+  });
+  const config:NormalizedProviderConfig={model,capabilities:{...caps,adapter_id:'hf_animation',mode:'real',evidence_refs:['fixture_idempotency'],supports_idempotent_recovery:true},
+    receipts:new MemoryReceipts(),journal:new MemoryJournal(),account_scope:'fixture-account',download:async()=>new Uint8Array([1]),input_url_fields:['image_url'],
+    async prepareParameters(){signatures++;return {...animation.parameters,image_url:`https://storage.example/image.png?signature=${signatures}`};},async beforeSend(){boundaries++;}};
+  const adapter=createHiggsfieldAdapter(config,client,()=>[]);
+  await assert.rejects(adapter.submit(animation));assert.equal(signatures,1);
+  const recovered=await adapter.recover(animation);assert.equal(recovered.outcome,'accepted');assert.equal(signatures,1);assert.equal(boundaries,2);
+  assert.equal(bodies[0],bodies[1]);assert.equal(keys[0],keys[1]);assert.match(bodies[1]!,/signature=1/);
+});
+test('Quote expiring during preparation blocks initial send and idempotent recovery at the final boundary',async()=>{
+  const model=getPipelineCatalog().models.find(m=>m.id==='hf_soul_standard_image')!,caps=await new SimulatedGenerationAdapter('image').capabilities();
+  const quote={adapter_id:'hf_image',account_scope:'account',request_hash:providerQuoteRequestHash(request),currency:'USD',upper_minor:10,
+    quoted_at:'2026-10-07T12:00:00.000Z',expires_at:'2026-10-07T12:01:00.000Z',evidence:'fixture_quote'};
+  const intent={adapter_id:'hf_image',request,estimate:{currency:'USD',upper_minor:10,evidence:'fixture_quote'}};let sends=0,now=new Date('2026-10-07T12:00:30Z');
+  validateProviderQuote(quote,intent,'account',now);
+  const client=new HiggsfieldClient(()=> 'fixture-key',async()=>{sends++;throw new Error('must not send');});
+  const adapter=createHiggsfieldAdapter({model,capabilities:{...caps,adapter_id:'hf_image',mode:'real',evidence_refs:['fixture_schema'],supports_idempotent_recovery:true},
+    receipts:new MemoryReceipts(),journal:new MemoryJournal(),account_scope:'account',download:async()=>new Uint8Array([1]),
+    async prepareParameters(){now=new Date('2026-10-07T12:01:01Z');return {prompt:request.parameters.prompt};},
+    async beforeSend(){validateProviderQuote(quote,intent,'account',now);}},client,()=>[]);
+  await assert.rejects(adapter.submit(request),/quote_expired/);assert.equal(sends,0);
+  await assert.rejects(adapter.recover(request),/quote_expired/);assert.equal(sends,0);
 });

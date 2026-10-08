@@ -1,4 +1,5 @@
 import type {SqlDatabase} from './configuration-store.js';
+import {randomUUID} from 'node:crypto';
 
 export class OperationalTelemetry{
   private readonly started=Date.now();
@@ -14,6 +15,11 @@ export async function operationalState(db:SqlDatabase){
   // Apenas agregados; parâmetros de geração, fontes, storage e credenciais não entram no relatório.
   const productions=(await db.query("SELECT r.record->>'status' AS status,count(*)::integer AS count FROM production_revisions r JOIN production_heads h USING(id,version) GROUP BY r.record->>'status' ORDER BY status")).rows;
   const jobs=(await db.query("SELECT r.record->>'state' AS state,count(*)::integer AS count FROM generation_revisions r JOIN generation_heads h USING(id,version) GROUP BY r.record->>'state' ORDER BY state")).rows;
-  const interrupted=(await db.query("SELECT count(*)::integer AS count FROM assembly_runs WHERE state='running' AND started_at<CURRENT_TIMESTAMP-INTERVAL '3 minutes'")).rows[0]?.count??0;
-  return {database:'ready',productions,jobs,interrupted_assemblies:Number(interrupted),attention_required:jobs.some(row=>row.state==='unknown')||Number(interrupted)>0};
+  const interrupted=(await db.query("SELECT count(*)::integer AS count FROM assembly_runs WHERE state='running' AND heartbeat_at<CURRENT_TIMESTAMP-INTERVAL '3 minutes'")).rows[0]?.count??0;
+  const quality=(await db.query("SELECT count(DISTINCT a.production_id)::integer AS count FROM assembly_runs a JOIN assembly_evidence e USING(command_id) JOIN production_heads p ON p.id=a.production_id JOIN production_revisions pr ON pr.id=p.id AND pr.version=p.version WHERE a.state='failed' AND a.diagnostic LIKE 'assembly_quality_%' AND e.record->'dossier'=pr.record->'dossier'")).rows[0]?.count??0;
+  return {database:'ready',productions,jobs,interrupted_assemblies:Number(interrupted),quality_pending:Number(quality),attention_required:jobs.some(row=>row.state==='unknown')||Number(interrupted)>0||Number(quality)>0};
 }
+export async function recordOperationalSample(db:SqlDatabase,http:ReturnType<OperationalTelemetry['snapshot']>){
+  const runtime=await operationalState(db);await db.query('INSERT INTO operational_samples(id,record) VALUES($1,$2::jsonb)',[randomUUID(),JSON.stringify({http,runtime})]);return runtime;
+}
+export async function operationalHistory(db:SqlDatabase,limit=100){if(!Number.isInteger(limit)||limit<1||limit>1000)throw new Error('operational_history_limit_invalid');return (await db.query('SELECT recorded_at,record FROM operational_samples ORDER BY recorded_at DESC LIMIT $1',[limit])).rows;}

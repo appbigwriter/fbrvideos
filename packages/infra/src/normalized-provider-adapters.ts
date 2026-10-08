@@ -39,6 +39,7 @@ export interface NormalizedProviderConfig {
   prepareParameters?:(request:AdapterRequest)=>Promise<AdapterRequest['parameters']>;
   resolveInputAssets?:(request:AdapterRequest)=>Promise<AdapterRequest['input_assets']>;
   input_url_fields?:('audio_url'|'image_url'|'end_image_url')[];
+  beforeSend?:(originalRequest:AdapterRequest)=>Promise<void>;
   download(url:string):Promise<Uint8Array>;
   usage?:ProviderOutputDescriptor['usage'];
 }
@@ -99,11 +100,29 @@ export class NormalizedProviderAdapter implements GenerationAdapter {
       const url=new URL(parameters[key] as string);if(url.protocol!=='https:'||url.username||url.password)throw new Error('provider_input_url_invalid');
     }
     if(request.operation==='avatar'&&!input_assets.length)throw new Error('provider_official_audio_missing');
-    await this.config.journal.pin(this.caps.adapter_id,request,{account_scope:this.config.account_scope,model:this.config.model.model,parameters,input_assets});
+    await this.config.journal.pin(this.caps.adapter_id,request,{request_hash:sha256(canonical(request)),account_scope:this.config.account_scope,model:this.config.model.model,parameters,input_assets});
+    await this.config.beforeSend?.(request);
     const response=await this.protocol.submit({...request,parameters,input_assets});return this.publish(response.external_id,request,response.receipt,response.observation);
   }
   async query(externalId:string):Promise<AdapterResult>{const record=await this.config.receipts.get(this.caps.adapter_id,externalId);if(!record||record.account_scope!==this.config.account_scope)throw new Error('provider_receipt_missing');return this.publish(externalId,record.request,record.receipt,await this.protocol.query(record));}
-  async recover(request:AdapterRequest){if(!this.caps.supports_idempotent_recovery)throw new Error('provider_recovery_unsupported');return this.submit(request);}
+  async lookupReceipt(raw:AdapterRequest):Promise<AdapterResult|null>{
+    const request=AdapterRequestSchema.parse(raw),stored=await this.config.receipts.find(this.caps.adapter_id,request.execution_key,request.attempt);
+    if(!stored)return null;
+    if(stored.account_scope!==this.config.account_scope||canonical(stored.request)!==canonical(request)||!stored.job.external_job_id)throw new Error('provider_receipt_intention_changed');
+    return this.query(stored.job.external_job_id);
+  }
+  async recover(raw:AdapterRequest){
+    const request=AdapterRequestSchema.parse(raw);if(!this.caps.supports_idempotent_recovery)throw new Error('provider_recovery_unsupported');
+    const receipt=await this.lookupReceipt(request);if(receipt)return receipt;
+    const stored=this.config.journal.get?await this.config.journal.get(this.caps.adapter_id,request):null;
+    if(!stored)throw new Error('provider_recovery_transmission_missing');
+    const pinned=z.object({request_hash:z.string(),account_scope:z.string(),model:z.string(),parameters:z.record(z.string(),z.json()),
+      input_assets:AdapterRequestSchema.shape.input_assets}).parse(stored);
+    if(pinned.request_hash!==sha256(canonical(request))||pinned.account_scope!==this.config.account_scope||pinned.model!==this.config.model.model)throw new Error('provider_http_intention_changed');
+    await this.config.beforeSend?.(request);
+    const response=await this.protocol.submit({...request,parameters:pinned.parameters,input_assets:pinned.input_assets});
+    return this.publish(response.external_id,request,response.receipt,response.observation);
+  }
   async cancel(externalId:string){const record=await this.config.receipts.get(this.caps.adapter_id,externalId);if(!record||record.account_scope!==this.config.account_scope||!this.protocol.cancel)throw new Error('provider_cancel_unsupported');return this.publish(externalId,record.request,record.receipt,await this.protocol.cancel(record));}
   async resolve(execution:GenerationExecution){
     const job=execution.provider_job;if(!job||job.status!=='succeeded'||execution.intent.adapter_id!==this.caps.adapter_id||!job.external_job_id)throw new Error('provider_outputs_not_ready');

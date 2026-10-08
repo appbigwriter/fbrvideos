@@ -12,6 +12,8 @@ import {PostgresGenerationQueue} from './generation-queue.js';
 import {belongsToExecution} from './asset-provenance.js';
 import {audioSpecificationMatches} from '@fbr/pipeline';
 import type {SourceReauditor} from './source-reaudit.js';
+import {supportsAssetStreaming} from './streaming-asset-store.js';
+import {parseMediaRange} from './media-range.js';
 
 const mediaSchemas = { asset: AssetSchema, evaluation: EvaluationSchema, approval: ApprovalSchema };
 async function production(client: SqlClient, id: string, lock = false) {
@@ -113,11 +115,22 @@ export class PostgresReviewWorkflow {
       throw new ApplicationError('ineligible','Vídeo histórico perdeu integridade.');
     return {bytes,mime_type:historic.asset.file.mime_type,hash:historic.asset.file.hash};
   }
+  async openHistoricalAsset(id:string,version:number,rangeHeader?:string){
+    await production(this.db,id);const historic=await this.historicalRender(id,version);
+    if(!historic)throw new ApplicationError('not_found','Vídeo histórico não disponível.');return this.openFile(historic.asset,rangeHeader);
+  }
+  private async openFile(asset:Asset,rangeHeader?:string){
+    let range;try{range=parseMediaRange(rangeHeader,asset.file.bytes);}catch(error){throw Object.assign(error as Error,{total_bytes:asset.file.bytes});}
+    if(supportsAssetStreaming(this.files)){const opened=await this.files.openVerified(asset,range);return{stream:opened.stream,mime_type:asset.file.mime_type,total_bytes:asset.file.bytes,range};}
+    if(asset.file.bytes>100_000_000)throw new ApplicationError('ineligible','Armazenamento exige suporte a streaming.');
+    const bytes=await this.files.read(asset.file.storage_key);if(bytes.length!==asset.file.bytes||sha256Bytes(bytes)!==asset.file.hash)throw new ApplicationError('ineligible','Arquivo perdeu integridade.');
+    return{bytes:range?bytes.subarray(range.start,range.end+1):bytes,mime_type:asset.file.mime_type,total_bytes:asset.file.bytes,range};
+  }
   async speechEditView(id:string){
     const p=await production(this.db,id),d=await dossier(this.db,p);
     return SpeechEditViewSchema.parse({production:{id,version:p.version},dossier:d?{id:d.id,version:d.version}:null,
       speeches:d?.blocks.flatMap(block=>block.speeches)??[],enabled:!!d&&(['ready_for_review','approved','exported'].includes(p.status)
-        ||(p.status==='awaiting_decision'&&!d.assets.length&&!d.jobs.length))&&p.costs.committed_minor===0&&!await unfinishedExecutions(this.db,id),
+        ||(p.status==='awaiting_decision'&&!d.assets.length&&!d.jobs.length)||(p.status==='correcting'&&d.status==='outdated'&&d.pending_issues.some(issue=>issue.code.includes('source_reaudit'))))&&p.costs.committed_minor===0&&!await unfinishedExecutions(this.db,id),
       notice:'Alterar fala invalida áudio, cenas derivadas, legendas, montagem e aprovação. As referências de fonte são preservadas e devem ser conferidas para o novo texto.'});
   }
   async approvePlanning(raw:unknown){
@@ -167,12 +180,13 @@ export class PostgresReviewWorkflow {
     return ProductionSchema.parse(await this.command(request.command_id,request,'edit_speech',async(client,p)=>{
       const d=await dossier(client,p);
       const planning=p.status==='awaiting_decision'&&d&&!d.assets.length&&!d.jobs.length;
-      if(!d||!sameRef(d,request.dossier)||(!planning&&!['ready_for_review','approved','exported'].includes(p.status))||p.costs.committed_minor!==0
+      const sourceCorrection=p.status==='correcting'&&d?.status==='outdated'&&d.pending_issues.some(issue=>issue.code.includes('source_reaudit'));
+      if(!d||!sameRef(d,request.dossier)||(!planning&&!sourceCorrection&&!['ready_for_review','approved','exported'].includes(p.status))||p.costs.committed_minor!==0
         ||d.jobs.some(job=>['queued','running','unknown'].includes(job.status)||job.costs.confirmed_minor===null)||await unfinishedExecutions(client,p.id))
         throw new ApplicationError('ineligible','Edição exige dossiê atual e nenhum job ou custo pendente.');
       const speech=d.blocks.flatMap(block=>block.speeches).find(s=>s.id===request.speech_id);
       if(!speech)throw new ApplicationError('not_found','Fala não encontrada no dossiê.');
-      if(speech.text===request.text)throw new ApplicationError('validation','O texto não foi alterado.');
+      if(speech.text===request.text&&!sourceCorrection)throw new ApplicationError('validation','O texto não foi alterado.');
       const snapshot=ProductionSnapshotSchema.parse((await client.query('SELECT record FROM production_snapshots WHERE production_id=$1',[p.id])).rows[0]?.record);
       const {hash,...body}=snapshot;
       if(hash!==sha256(canonical(body))||snapshot.production_id!==p.id)throw new ApplicationError('ineligible','Snapshot da fonte inconsistente.');
@@ -199,6 +213,10 @@ export class PostgresReviewWorkflow {
           impact:correctionImpact(d,[{id:d.id,version:d.version}]),costs:{...p.costs,estimated_minor:null},additional_cost_authorized:false});
         await client.query('INSERT INTO correction_proposal_heads(id,production_id,point_id,version) VALUES($1,$2,NULL,1)',[correction.id,p.id]);
         await client.query('INSERT INTO correction_proposal_revisions(id,version,record) VALUES($1,1,$2::jsonb)',[correction.id,JSON.stringify(correction)]);
+      }
+      if(sourceCorrection){
+        const active=(await client.query('SELECT r.record FROM correction_proposal_revisions r JOIN correction_proposal_heads h USING(id,version) WHERE h.production_id=$1',[p.id])).rows.map(row=>CorrectionSchema.parse(row.record));
+        if(active.some(c=>['awaiting_cost_authorization','authorized','running'].includes(c.status)))throw new ApplicationError('ineligible','Cancele o plano anterior antes de corrigir fontes.');
       }
       return appendProduction(client,p,{status:planning?'awaiting_decision':'correcting',stage:planning?'script_direction':'generation',dossier:{id:next.id,version:next.version},current_render:null,current_approval:null,
         pending_issues:[...p.pending_issues.filter(i=>i.code!=='correction_dependencies_outdated'&&(!planning||i.code!=='provider_setup_pending')),
@@ -478,7 +496,7 @@ export class PostgresReviewWorkflow {
       return appendProduction(client,p,{status:'exported',stage:'delivery'},'exported','Manifesto e arquivos da revisão aprovada verificados para entrega.');
     }));
   }
-  async asset(id:string,ref:VersionRef) {
+  private async currentAssetRecord(id:string,ref:VersionRef) {
     const p=await production(this.db,id),d=await dossier(this.db,p);
     let render=await this.render(this.db,p,d,ref);
     if(!render||!p.current_render||!sameRef(render,p.current_render)){
@@ -489,6 +507,11 @@ export class PostgresReviewWorkflow {
         throw new ApplicationError('not_found','Arquivo da revisão não disponível.');
       render=subtitle;
     }
+    return render;
+  }
+  async openCurrentAsset(id:string,ref:VersionRef,rangeHeader?:string){return this.openFile(await this.currentAssetRecord(id,ref),rangeHeader);}
+  async asset(id:string,ref:VersionRef) {
+    const render=await this.currentAssetRecord(id,ref);
     if(render.file.bytes>100_000_000) throw new ApplicationError('ineligible','Arquivo exige armazenamento com streaming para este tamanho.');
     const bytes=await this.files.read(render.file.storage_key);
     if(bytes.length!==render.file.bytes||sha256Bytes(bytes)!==render.file.hash) throw new ApplicationError('ineligible','Arquivo perdeu integridade.');

@@ -21,7 +21,7 @@ export class HiggsfieldClient{
     const key=this.key();if(!key.trim()||/[\r\n]/.test(key))throw new Error('higgsfield_credential_missing');
     const headers=new Headers({Authorization:`Key ${key}`,Accept:'application/json'});
     if(body!==undefined)headers.set('Content-Type','application/json');if(idempotencyKey)headers.set('Idempotency-Key',idempotencyKey);
-    const response=await this.network(providerUrl(path),{method,headers,redirect:'error',signal:AbortSignal.timeout(15000),...(body===undefined?{}:{body:JSON.stringify(body)})});
+    const response=await this.network(providerUrl(path),{method,headers,redirect:'error',signal:AbortSignal.timeout(15000),...(body===undefined?{}:{body:canonical(body)})});
     if(!response.ok)throw new Error('higgsfield_http_failure');
     if(response.status===202&&body===undefined)return null;
     if(!response.headers.get('content-type')?.includes('application/json'))throw new Error('higgsfield_response_type_invalid');

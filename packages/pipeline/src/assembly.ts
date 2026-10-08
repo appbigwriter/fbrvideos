@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { DossierSchema, DeliveryProfileSchema, TimelineSchema, type Dossier, type Timeline,
   type Asset, type VersionRef, type DeliveryProfile } from '@fbr/contracts';
 import { sameRef,canonical } from '@fbr/domain';
-import { alignedSubtitleCues, type SubtitleAlignment, type SubtitleLayout } from './subtitle-alignment.js';
+import { alignedSubtitleCues, layoutSubtitleText, type SubtitleAlignment, type SubtitleLayout } from './subtitle-alignment.js';
 
 export interface AssemblyBindings {
   audio: { speech_segment_id: string; asset: VersionRef }[];
@@ -63,7 +63,8 @@ export function assembleTimeline(raw: Dossier, rawDelivery: DeliveryProfile, bin
       const alignment = bindings.subtitle_alignment?.find(value => value.speech_segment_id === speech.id);
       if (bindings.subtitle_alignment && !alignment) throw new Error('assembly_subtitle_alignment_missing');
       if (alignment) subtitles.push(...alignedSubtitleCues(speech.text, asset, alignment.alignment, start, speech.id, bindings.subtitle_layout!));
-      else subtitles.push({ start_seconds: start, end_seconds: end, speech_segment_id: speech.id, text: speech.text });
+      else subtitles.push({ start_seconds: start, end_seconds: end, speech_segment_id: speech.id,
+        text: bindings.subtitle_layout ? layoutSubtitleText(speech.text, bindings.subtitle_layout) : speech.text });
     }
   }
   if (bindings.video.length !== dossier.shots.length || new Set(bindings.video.map(binding => `${binding.shot.id}:${binding.shot.version}`)).size !== dossier.shots.length)
@@ -97,7 +98,8 @@ export function assembleTimeline(raw: Dossier, rawDelivery: DeliveryProfile, bin
   return TimelineSchema.parse({ id: randomUUID(), version: 1, created_at: now, author: 'local_assembler',
     changes: [{ at: now, author: 'local_assembler', reason: 'Montagem pelo áudio medido, com clips sem áudio duplicado.' }],
     status: 'ready', production: dossier.production, duration_seconds: totalSamples / delivery.audio_sample_rate,
-    delivery, audio, video, subtitles, music: bindings.music??[], transitions: bindings.transitions??[] });
+    delivery, audio, video, subtitles, ...(bindings.subtitle_layout ? { subtitle_layout: bindings.subtitle_layout } : {}),
+    music: bindings.music??[], transitions: bindings.transitions??[] });
 }
 export function timelineSubtitles(raw: Timeline, format: 'srt' | 'vtt') {
   const timeline = TimelineSchema.parse(raw);
@@ -110,8 +112,14 @@ export function timelineSubtitles(raw: Timeline, format: 'srt' | 'vtt') {
   const lines = cues.map((cue, i) => {
     if (Math.round(cue.end_seconds * 1000) <= Math.round(cue.start_seconds * 1000)
       || (i > 0 && cue.start_seconds < cues[i - 1]!.end_seconds)) throw new Error('assembly_subtitle_interval_invalid');
-    const text = cue.text.replace(/\s+/g, ' ').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `${i + 1}\n${timestamp(cue.start_seconds)} --> ${timestamp(cue.end_seconds)}\n${text}\n`;
+    const text = cue.text.replace(/\r\n?/gu, '\n').split('\n').map(line => line.replace(/\s+/gu, ' ').trim()).filter(Boolean).join('\n')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const percent = (value: number) => String(Number((value * 100).toFixed(4)));
+    const area = timeline.subtitle_layout?.safe_area;
+    // W3C WebVTT cue settings: percent line + end anchor; centered position and bounded width.
+    const settings = format === 'vtt' && area
+      ? ` line:${percent(area.bottom)}%,end position:${percent((area.left + area.right) / 2)}%,center size:${percent(area.right - area.left)}% align:center` : '';
+    return `${i + 1}\n${timestamp(cue.start_seconds)} --> ${timestamp(cue.end_seconds)}${settings}\n${text}\n`;
   });
   return `${format === 'vtt' ? 'WEBVTT\n\n' : ''}${lines.join('\n')}`;
 }

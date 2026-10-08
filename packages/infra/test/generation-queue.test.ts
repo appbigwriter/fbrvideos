@@ -12,6 +12,9 @@ import { ConfigurationService, ProductionService, sha256 } from '@fbr/domain';
 import { GenerationWorker, SimulatedGenerationAdapter, getPipelineCatalog } from '@fbr/pipeline';
 import {PostgresBudgetWorkflow} from '../src/budget-workflow.js';
 import {reconcileSettledInvoices} from '../src/provider-callback-inbox.js';
+import {createHeygenAdapter,PostgresProviderReceiptStore} from '../src/normalized-provider-adapters.js';
+import {PostgresHttpTransmissionJournal} from '../src/http-generation-adapter.js';
+import {HeygenClient} from '../src/heygen-client.js';
 import { PostgresDatabase, PostgresConfigurationStore, PostgresProductionStore, PostgresGenerationQueue,
   GenerationTransport, PostgresMediaStore, LocalImmutableAssetStore, captureMetadataBackup, restoreMetadataBackup,
   migrateConfiguration, type SqlClient, type SqlDatabase } from '../src/index.js';
@@ -104,6 +107,22 @@ test('Reconciliação periódica de faturas terminais consulta adapter liberado 
   assert.deepEqual(await reconcileSettledInvoices(granted,registry,[p.id],async()=>false),{checked:0,pending:1});assert.equal(queries,0);
   assert.deepEqual(await reconcileSettledInvoices(granted,registry,[p.id],async()=>true),{checked:1,pending:0});assert.equal(queries,1);assert.equal(sends,0);
   assert.equal((await granted.get(execution.id))?.confirmed_minor,70);
+});
+
+test('Crash após recibo HeyGen persistido e antes do queue.complete recupera por consulta sem novo envio',async()=>{
+  const p=await source(),base=await intent(p.id,100),model=getPipelineCatalog().models.find(m=>m.id==='heygen_official_voice')!,caps=await new SimulatedGenerationAdapter('audio').capabilities();
+  const planned={...base,adapter_id:'heygen_receipt_audio',request:{...base.request,parameters:{text:'Fixture speech.',voice_id:'fixture_voice'},references:[{id:'official_fixture_voice',version:1}]}};
+  const queueWithGate=new PostgresGenerationQueue(db,async()=>true),execution=await queueWithGate.enqueue(planned);
+  let sends=0;const client=new HeygenClient(()=> 'fixture-key',async()=>{sends++;return new Response(JSON.stringify({data:{request_id:`speech_${execution.id}`,audio_url:'https://storage.example/fixture.mp3',duration:1,engine:'orca'}}),{headers:{'Content-Type':'application/json'}});});
+  const createAdapter=()=>createHeygenAdapter({model,capabilities:{...caps,adapter_id:planned.adapter_id,mode:'real',can_cancel_job:false,supports_idempotent_recovery:false,
+    supported_fields:model.parameters.map(p=>p.name),evidence_refs:['offline_receipt_schema']},account_scope:'fixture-account',receipts:new PostgresProviderReceiptStore(db),journal:new PostgresHttpTransmissionJournal(db),
+    download:async()=>new Uint8Array([1]),billing:{async resolve(){return {currency:'BRL',confirmed_minor:70,evidence:'fixture-only invoice'};}}},client);
+  let writes=0;
+  class LostCompleteQueue extends PostgresGenerationQueue{override async complete(id:string,token:string,job:unknown){writes++;if(writes===1)throw new Error('lost queue completion');return super.complete(id,token,job);}}
+  const interrupted=await new GenerationWorker(new LostCompleteQueue(db,async()=>true),new Map([[planned.adapter_id,createAdapter()]]),async()=>true).run(execution.id);
+  assert.equal(interrupted.state,'unknown');assert.equal(interrupted.provider_job,null);assert.equal(sends,1);
+  const restarted=new GenerationWorker(queueWithGate,new Map([[planned.adapter_id,createAdapter()]]),async()=>true);
+  const recovered=await restarted.run(execution.id);assert.equal(recovered.state,'succeeded');assert.equal(recovered.confirmed_minor,70);assert.ok(recovered.provider_job?.external_job_id);assert.equal(sends,1);
 });
 test('Reserva concorrente é atômica, replay persiste e outra intenção não reutiliza a chave', async () => {
   const p = await source(), a = await intent(p.id, 600), b = await intent(p.id, 600);

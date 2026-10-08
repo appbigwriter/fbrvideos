@@ -3,9 +3,17 @@ import {AdapterCapabilitiesSchema,AdapterRequestSchema,AdapterResultSchema,type 
 import {z} from 'zod';
 import {canonical,sha256} from '@fbr/domain';
 import type {SqlDatabase} from './configuration-store.js';
-export interface HttpTransmissionJournal{pin(adapterId:string,request:AdapterRequest,payload:unknown):Promise<void>}
+export interface HttpTransmissionJournal{pin(adapterId:string,request:AdapterRequest,payload:unknown):Promise<void>;
+  get?(adapterId:string,request:AdapterRequest):Promise<unknown|null>}
 export class PostgresHttpTransmissionJournal implements HttpTransmissionJournal{
   constructor(private readonly db:SqlDatabase){}
+  async get(adapterId:string,request:AdapterRequest){
+    const row=(await this.db.query('SELECT production_id,fingerprint,record FROM provider_http_intents WHERE adapter_id=$1 AND execution_key=$2 AND attempt=$3',
+      [adapterId,request.execution_key,request.attempt])).rows[0];if(!row)return null;
+    const payload=z.json().parse(row.record);
+    if(row.production_id!==request.production.id||row.fingerprint!==sha256(canonical(payload)))throw new Error('provider_http_intention_changed');
+    return payload;
+  }
   async pin(adapterId:string,request:AdapterRequest,raw:unknown){
     const payload=z.json().parse(raw),fingerprint=sha256(canonical(payload));
     await this.db.transaction(async client=>{
@@ -46,7 +54,7 @@ export class HttpGenerationAdapter implements GenerationAdapter{
     if(body!==undefined)headers.set('Content-Type','application/json');
     if(context.request)headers.set('Idempotency-Key',`${context.request.execution_key}:${context.request.attempt}`);
     const response=await this.request(url,{method,headers,redirect:'error',signal:AbortSignal.timeout(15000),
-      ...(body===undefined?{}:{body:JSON.stringify(body)})});
+      ...(body===undefined?{}:{body:canonical(body)})});
     if(!response.ok)throw new Error('provider_http_failure');
     if(!response.headers.get('content-type')?.includes('application/json'))throw new Error('provider_response_type_invalid');
     const reader=response.body?.getReader();if(!reader)throw new Error('provider_response_empty');
@@ -65,13 +73,17 @@ export class HttpGenerationAdapter implements GenerationAdapter{
       ||(request.operation==='avatar'&&(!this.caps.accepts_official_audio||!request.input_assets.length)))throw new Error('provider_capability_missing');
     await this.binding.validate(request);
     const mapped=this.binding.submit(request);
-    if(this.journal)await this.journal.pin(this.caps.adapter_id,request,{origin:this.origin.origin,account_scope:this.binding.account_scope,path:mapped.path,body:z.json().parse(mapped.body)});
+    if(this.journal)await this.journal.pin(this.caps.adapter_id,request,{request_hash:sha256(canonical(request)),origin:this.origin.origin,account_scope:this.binding.account_scope,path:mapped.path,body:z.json().parse(mapped.body)});
     return this.call(mapped.path,'POST',mapped.body,{request,external_id:null});
   }
   async query(externalId:string){if(!this.caps.can_query_job)throw new Error('provider_query_unsupported');return this.call(this.binding.query(externalId),'GET',undefined,{request:null,external_id:externalId});}
   async recover(request:AdapterRequest){
     if(!this.caps.supports_idempotent_recovery||!this.caps.evidence_refs.length)throw new Error('provider_idempotent_recovery_unsupported');
-    return this.submit(request);
+    const stored=this.journal?.get?await this.journal.get(this.caps.adapter_id,request):null;
+    if(!stored)throw new Error('provider_recovery_transmission_missing');
+    const pinned=z.object({request_hash:z.string(),origin:z.string(),account_scope:z.string(),path:z.string(),body:z.json()}).parse(stored);
+    if(pinned.request_hash!==sha256(canonical(request))||pinned.origin!==this.origin.origin||pinned.account_scope!==this.binding.account_scope)throw new Error('provider_http_intention_changed');
+    return this.call(pinned.path,'POST',pinned.body,{request,external_id:null});
   }
   async cancel(externalId:string){if(!this.caps.can_cancel_job)throw new Error('provider_cancel_unsupported');return this.call(this.binding.cancel(externalId),'POST',undefined,{request:null,external_id:externalId});}
 }

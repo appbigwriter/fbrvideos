@@ -178,10 +178,18 @@ const audioSegment = z.strictObject({ ...timed, speech_segment_id: IdSchema, ass
   .refine(v => v.end_seconds > v.start_seconds && v.source_out_seconds > v.source_in_seconds, { message: 'Intervalo de áudio inválido' });
 const subtitleSegment = z.strictObject({ ...timed, speech_segment_id: IdSchema, text })
   .refine(v => v.end_seconds > v.start_seconds, { message: 'Intervalo de legenda inválido' });
+export const SubtitleLayoutSchema = z.strictObject({
+  max_characters_per_line: z.int().min(10).max(100), max_lines: z.int().min(1).max(3),
+  max_characters_per_second: z.number().positive().finite(),
+  safe_area: z.strictObject({ left: z.number().min(0).max(1), top: z.number().min(0).max(1),
+    right: z.number().min(0).max(1), bottom: z.number().min(0).max(1) }),
+}).refine(v => v.safe_area.left < v.safe_area.right && v.safe_area.top < v.safe_area.bottom,
+  { message: 'Área reservada de legenda inválida' });
 export const TimelineSchema = z.strictObject({
   ...versioned, status: z.enum(['draft', 'ready', 'rendered', 'outdated']),
   production: VersionRefSchema, duration_seconds: z.number().positive(), delivery: DeliveryProfileSchema,
   audio: z.array(audioSegment).min(1), video: z.array(clipSegment).min(1), subtitles: z.array(subtitleSegment),
+  subtitle_layout: SubtitleLayoutSchema.optional(),
   music: z.array(z.strictObject({ asset: VersionRefSchema, gain_db: z.number(), ...timed })),
   transitions: z.array(z.strictObject({ at_seconds: z.number().nonnegative(), type: text, duration_seconds: z.number().nonnegative() })),
 }).superRefine((v, ctx) => {
@@ -189,6 +197,13 @@ export const TimelineSchema = z.strictObject({
     if (segments.some(s => s.start_seconds >= s.end_seconds || s.end_seconds > v.duration_seconds)) ctx.addIssue({ code: 'custom', message: `${kind}: segmento fora da timeline` });
   }
   if (v.transitions.some(t => t.at_seconds + t.duration_seconds > v.duration_seconds)) ctx.addIssue({ code: 'custom', message: 'Transição fora da timeline' });
+  if (v.subtitle_layout) for (const cue of v.subtitles) {
+    const lines = cue.text.replace(/\r\n?/gu, '\n').split('\n');
+    if (lines.length > v.subtitle_layout.max_lines || lines.some(line => !line.trim() || line.length > v.subtitle_layout!.max_characters_per_line))
+      ctx.addIssue({ code: 'custom', message: 'Legenda excede linhas ou caracteres do layout fixado' });
+    if (cue.text.replace(/\s+/gu, ' ').trim().length / (cue.end_seconds - cue.start_seconds) > v.subtitle_layout.max_characters_per_second)
+      ctx.addIssue({ code: 'custom', message: 'Velocidade de leitura da legenda excede o layout fixado' });
+  }
 });
 
 export const ApprovalSchema = z.strictObject({

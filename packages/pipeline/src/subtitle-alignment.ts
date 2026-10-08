@@ -1,4 +1,4 @@
-import type { Asset, Timeline } from '@fbr/contracts';
+import { SubtitleLayoutSchema, type Asset, type Timeline } from '@fbr/contracts';
 
 /** Timings must be observed by the provider/aligner, never extrapolated from word counts. */
 export interface SubtitleAlignment {
@@ -7,6 +7,7 @@ export interface SubtitleAlignment {
   words: { text: string; start_seconds: number; end_seconds: number }[];
 }
 export interface SubtitleAligner {
+  version:string;
   align(input: { audio: Asset; text: string; language: string }): Promise<SubtitleAlignment>;
 }
 export interface SubtitleLayout {
@@ -37,20 +38,33 @@ export function alignedSubtitleCues(text: string, asset: Asset, alignment: Subti
       throw new Error('subtitle_alignment_interval_invalid');
     previous = word.end_seconds;
   }
-  const groups: typeof alignment.words[] = []; let group: typeof alignment.words = [], lines = [''];
+  const groups: { words: typeof alignment.words; lines: string[] }[] = []; let group: typeof alignment.words = [], lines = [''];
   for (const word of alignment.words) {
     const value = normalized(word.text), current = lines.at(-1)!;
     if ((current ? `${current} ${value}` : value).length > layout.max_characters_per_line) {
-      if (lines.length === layout.max_lines) { groups.push(group); group = []; lines = ['']; }
+      if (lines.length === layout.max_lines) { groups.push({ words: group, lines: [...lines] }); group = []; lines = ['']; }
       else lines.push('');
     }
     lines[lines.length - 1] = lines.at(-1) ? `${lines.at(-1)} ${value}` : value;
     group.push(word);
   }
-  if (group.length) groups.push(group);
-  return groups.map(words => {
-    const start = words[0]!.start_seconds, end = words.at(-1)!.end_seconds, value = normalized(words.map(word => word.text).join(' '));
-    if (value.length / (end - start) > layout.max_characters_per_second) throw new Error('subtitle_reading_speed_exceeded');
+  if (group.length) groups.push({ words: group, lines });
+  return groups.map(({ words, lines }) => {
+    const start = words[0]!.start_seconds, end = words.at(-1)!.end_seconds, value = lines.join('\n');
+    if (normalized(value).length / (end - start) > layout.max_characters_per_second) throw new Error('subtitle_reading_speed_exceeded');
     return { start_seconds: offset + start, end_seconds: offset + end, speech_segment_id: speechId, text: value };
   });
+}
+/** Line wrapping changes presentation only. Cue boundaries continue to use measured evidence. */
+export function layoutSubtitleText(text: string, rawLayout: SubtitleLayout): string {
+  const layout = SubtitleLayoutSchema.parse(rawLayout), lines = [''];
+  for (const word of normalized(text).split(' ')) {
+    if (word.length > layout.max_characters_per_line) throw new Error('subtitle_word_exceeds_line');
+    const line = lines.at(-1)!;
+    if ((line ? `${line} ${word}` : word).length > layout.max_characters_per_line) {
+      if (lines.length === layout.max_lines) throw new Error('subtitle_observed_alignment_required');
+      lines.push(word);
+    } else lines[lines.length - 1] = line ? `${line} ${word}` : word;
+  }
+  return lines.join('\n');
 }

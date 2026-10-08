@@ -1,5 +1,7 @@
 # Operação local — 5 de outubro de 2026
 
+Estado atual de 7/10: [entrega da tasklist, modos integrados, migrações 015 e backup 12](entrega-tasklist-2026-10-07.md). Os trechos abaixo são históricos; worker/API também suportam modo sintético explícito e runtime real provisionado.
+
 Atualização de 6/10: [entregas e provisionamento das sprints](continuacao-sprints-autonomas-2026-10-06.md). As descrições históricas abaixo sobre autenticação e modo exclusivo de simulação foram ampliadas conforme as opções deste adendo.
 
 API em 127.0.0.1:3001, web em 127.0.0.1:5173 e PostgreSQL nativo em 127.0.0.1:55432. A configuração existente do planejador OAuth é preservada. Acesso remoto/autenticação de implantação, retenção definitiva e geração de fornecedores reais ainda não foram liberados.

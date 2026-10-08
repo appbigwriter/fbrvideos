@@ -1,4 +1,4 @@
-import { PostgresDatabase, PostgresConfigurationStore, PostgresProductionStore, PostgresGenerationQueue, CodexOAuthInference,PostgresInferenceJournal, LocalImmutableAssetStore, PostgresReviewWorkflow,operationalState,loadProviderRuntime,createProviderRuntime,CalibrationService,operationalReadiness,RetentionService,createCodexSourceReauditor } from '@fbr/infra';
+import { PostgresDatabase, PostgresConfigurationStore, PostgresProductionStore, PostgresGenerationQueue, CodexOAuthInference,PostgresInferenceJournal, LocalImmutableAssetStore, PostgresReviewWorkflow,operationalState,loadProviderRuntime,createProviderRuntime,CalibrationService,operationalReadiness,RetentionService,createCodexSourceReauditor,PostgresBudgetWorkflow,recordOperationalSample,operationalHistory } from '@fbr/infra';
 import { ConfigurationService, ProductionService } from '@fbr/domain';
 import { buildApp } from './app.js';
 import { getPipelineCatalog, AutomaticPlanner,SemanticPlanner } from '@fbr/pipeline';
@@ -29,6 +29,8 @@ const retention=new RetentionService(database,process.env.FBR_ASSET_ROOT??'var/a
 const app = buildApp(new ConfigurationService(new PostgresConfigurationStore(database)), {productions,planner,generation:new PostgresGenerationQueue(database,providers?.admission.bind(providers)),review:new PostgresReviewWorkflow(database,files,providers?.admission.bind(providers),sourceAudit.auditor),operationalState:()=>operationalState(database),
   ...(providers?.prepareCorrection?{prepareCorrection:providers.prepareCorrection.bind(providers)}:{}),
   ...(providers?.pipeline?{pipeline:providers.pipeline}:{}),calibration:new CalibrationService(database),readiness:()=>operationalReadiness(database),retentionPlan:()=>retention.dryRun({keep_referenced:true,orphan_grace_days:30}),
+  budget:new PostgresBudgetWorkflow(database),...(providers?.receiveCallback?{providerCallback:providers.receiveCallback.bind(providers)}:{}),
+  recordTelemetry:snapshot=>recordOperationalSample(database,snapshot),operationalHistory:()=>operationalHistory(database),
   ...(accessToken?{accessToken,secureCookie:!local}:{}),...(allowedHosts?.length?{allowedHosts}:{}),...(allowedOrigins?.length?{allowedOrigins}:{})});
 let recovering=false;
 const recover=async()=>{if(recovering)return;recovering=true;try{await planner.recover();await providers?.recover?.();}catch{app.log.error('Recuperação de produção pendente.');}finally{recovering=false;}};

@@ -31,7 +31,9 @@ export interface RealPipelineOperationConfig {
   input_url_fields?:('audio_url'|'image_url'|'end_image_url')[];
 }
 export interface RealPipelineConfig {operations:Partial<Record<Operation,RealPipelineOperationConfig>>;media_origins:string[];
-  network?:typeof fetch;media_transport?:MediaTransferTransport}
+  assembly_quality?:import('./assembly-service.js').AssemblyQualityOptions;
+  network?:typeof fetch;media_transport?:MediaTransferTransport;
+  decodeAuthenticatedCallback?:(adapterId:string,body:unknown,headers:Readonly<Record<string,string|string[]|undefined>>)=>Promise<import('./provider-callback-inbox.js').CallbackSignal>}
 
 /** Concrete composition with local durable journals. Construction performs no provider requests. */
 export async function createRealPipelineBindings(config:RealPipelineConfig,context:{db:SqlDatabase;files:AssetStore}){
@@ -39,10 +41,10 @@ export async function createRealPipelineBindings(config:RealPipelineConfig,conte
   const transfer=new ProviderMediaTransfer(config.media_origins,config.media_transport);
   const routes=new Map<string,RealPipelineOperationConfig>();
   const quoteKey=(intent:GenerationIntent)=>[intent.adapter_id,intent.request.execution_key,intent.request.attempt];
-  const verifyQuote=async(intent:GenerationIntent)=>{
+  const verifyQuote=async(intent:GenerationIntent,admissionContext?:import('@fbr/contracts').GenerationAdmissionContext)=>{
     const route=routes.get(intent.adapter_id);if(!route?.enabled)throw new Error('real_pipeline_route_closed');
-    const row=(await db.query('SELECT record FROM provider_quotes WHERE adapter_id=$1 AND execution_key=$2 AND attempt=$3',quoteKey(intent))).rows[0];
-    validateProviderQuote(row?.record,intent,route.account_scope);
+    const record=admissionContext?await admissionContext.quote(intent.adapter_id,intent.request.execution_key,intent.request.attempt):(await db.query('SELECT record FROM provider_quotes WHERE adapter_id=$1 AND execution_key=$2 AND attempt=$3',quoteKey(intent))).rows[0]?.record;
+    validateProviderQuote(record,intent,route.account_scope);
   };
   async function ownedInputs(request:AdapterRequest){
     const {d}=await pipelineState(db,request.production.id);
@@ -81,6 +83,13 @@ export async function createRealPipelineBindings(config:RealPipelineConfig,conte
     const normalizedConfig={capabilities:caps,model:route.model,receipts,journal,account_scope:route.account_scope,billing:route.billing,
       input_url_fields:route.input_url_fields??[],
       ...(route.usage?{usage:route.usage}:{}),
+      async beforeSend(request:AdapterRequest){
+        const {p,d}=await pipelineState(db,request.production.id);
+        if(!['producing','correcting'].includes(p.status)||p.pending_issues.some(i=>i.required&&!i.code.startsWith('review_point:')&&i.code!=='correction_dependencies_outdated')
+          ||d.pending_issues.some(i=>i.required&&i.code!=='correction_dependencies_outdated'))throw new Error('real_pipeline_send_not_currently_eligible');
+        if(!await route.authorize(p))throw new Error('real_pipeline_spending_not_authorized');
+        await verifyQuote({adapter_id:route.adapter_id,request,estimate:{currency:request.currency,upper_minor:request.reserved_minor,evidence:'Verificação do quote persistido antes de transmissão.'}});
+      },
       async download(url:string){const measured=await transfer.download(url,files,bytes=>probeLocalMedia(bytes,operation==='audio'?'audio':operation==='image'?'image':'clip'));return files.read(measured.storage_key);},
       async resolveInputAssets(request:AdapterRequest){return (await ownedInputs(request)).map(a=>({id:a.id,version:a.version}));},
       async prepareParameters(request:AdapterRequest){return route.prepareParameters(request,await ownedInputs(request),files);}};
@@ -117,10 +126,12 @@ export async function createRealPipelineBindings(config:RealPipelineConfig,conte
       validateIntent:verifyQuote,
     };
   }
-  const admission:GenerationAdmission=async(intent,production)=>{try{const route=routes.get(intent.adapter_id);return !!route&&await route.authorize(production)&&!!await verifyQuote(intent).then(()=>true);}catch{return false;}};
+  const admission:GenerationAdmission=async(intent,production,admissionContext)=>{try{const route=routes.get(intent.adapter_id);return !!route&&await route.authorize(production)&&!!await verifyQuote(intent,admissionContext).then(()=>true);}catch{return false;}};
   async function admitReal(execution:GenerationExecution){const route=routes.get(execution.intent.adapter_id);if(!route?.enabled)return false;
     // Status/billing queries don't authorize another purchase; recovery/submission still requires a valid quote and spending gate.
     if(execution.provider_job?.external_job_id)return true;
+    const durable=await receipts.find(execution.intent.adapter_id,execution.intent.request.execution_key,execution.intent.request.attempt);
+    if(durable&&durable.account_scope===route.account_scope&&canonical(durable.request)===canonical(execution.intent.request))return true;
     const {p}=await pipelineState(db,execution.intent.request.production.id);return admission(execution.intent,p);
   }
   return {bindings,admission,admitReal};

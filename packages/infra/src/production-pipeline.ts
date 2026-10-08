@@ -1,13 +1,13 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {z} from 'zod';
-import {ProductionSchema,ProductionSnapshotSchema,DossierSchema,AssetSchema,EvaluationSchema,GenerationIntentSchema,CorrectionSchema,CorrectionExecutionPlanSchema,
+import {ProductionSchema,ProductionSnapshotSchema,DossierSchema,AssetSchema,EvaluationSchema,GenerationIntentSchema,CorrectionSchema,CorrectionExecutionPlanSchema,AdapterCapabilitiesSchema,
   GenerationExecutionSchema,type Production,type Dossier,type Asset,type GenerationIntent,type GenerationExecution,type GenerationAdapter,type AssetStore,type VersionRef,type ProductionSnapshot} from '@fbr/contracts';
 import {ApplicationError,canonical,sha256,sameRef,correctionImpact,invalidateDossier} from '@fbr/domain';
 import {belongsToExecution} from './asset-provenance.js';
 import {PostgresGenerationQueue} from './generation-queue.js';
 import {PostgresReviewWorkflow} from './review-workflow.js';
 import {PostgresMediaStore} from './media-store.js';
-import {LocalAssemblyService} from './assembly-service.js';
+import {LocalAssemblyService,assemblyQualityFingerprint,type AssemblyQualityOptions} from './assembly-service.js';
 import {probeLocalMedia} from './media-probe.js';
 import type {SqlClient,SqlDatabase} from './configuration-store.js';
 import type {PipelineOutputResolver,PipelineOutput} from './synthetic-media-adapter.js';
@@ -44,7 +44,7 @@ async function publish(client:SqlClient,p:Production,d:Dossier,patch:Partial<Pro
 const assetType=(operation:string)=>operation==='audio'?'audio':operation==='image'?'image':'clip';
 /** Compila etapas; arquivos e aprovação são persistidos antes de liberar dependentes. */
 export class ProductionPipeline{
-  constructor(private readonly db:SqlDatabase,private readonly files:AssetStore,private readonly bindings:PipelineBindings,private readonly queue:PostgresGenerationQueue,private readonly review:PostgresReviewWorkflow){}
+  constructor(private readonly db:SqlDatabase,private readonly files:AssetStore,private readonly bindings:PipelineBindings,private readonly queue:PostgresGenerationQueue,private readonly review:PostgresReviewWorkflow,private readonly quality:AssemblyQualityOptions={}){}
   private context(p:Production,d:Dossier,snapshot:ProductionSnapshot,operation:PipelineOperationContext['operation'],label:string,shot:VersionRef|null,requires:string[],text:string,previous?:Asset):PipelineOperationContext{
     const delivery=snapshot.profile.delivery;if(!delivery)throw new ApplicationError('ineligible','Formato de entrega ausente.');
     const speeches=d.blocks.flatMap(block=>block.speeches),target=shot?d.shots.find(s=>sameRef(s,shot)):null;
@@ -87,14 +87,23 @@ export class ProductionPipeline{
       if(!d.assets.some(a=>sameRef(a.specification,shot)&&a.status==='approved'&&['image','clip'].includes(a.type)))throw new ApplicationError('ineligible','Cena exige mídia existente aprovada.');
     }else{await this.intent(this.context(p,d,snapshot,shot.route==='avatar'?'avatar':'image',shot.id,{id:shot.id,version:shot.version},[],shot.intent));
       if(shot.route==='animated_scene')await this.intent(this.context(p,d,snapshot,'animation',shot.id,{id:shot.id,version:shot.version},[],shot.intent));}}
-    const started=await this.review.beginGeneration(command);await this.advance(p.id);return (await pipelineState(this.db,started.id)).p;
+    const started=await this.review.beginGeneration(command);await this.advance(p.id);return started;
   }
   async canExecute(execution:GenerationExecution){
     const step=stepSchema.safeParse(execution.intent.request.parameters['_fbr']);if(!step.success)return true;
     const {p,d}=await pipelineState(this.db,execution.intent.request.production.id);
     if(!['producing','correcting'].includes(p.status))return false;
+    const issue=d.pending_issues.find(issue=>issue.required&&issue.code!=='correction_dependencies_outdated')??p.pending_issues.find(issue=>issue.required&&!issue.code.startsWith('review_point:')&&issue.code!=='correction_dependencies_outdated');
+    if(issue){if(execution.state==='prepared')await this.queue.explainPrepared(execution.id,`${issue.message} ${issue.next_action}`);return false;}
     const jobs=await this.queue.list(p.id);
-    return (await Promise.all(step.data.requires.map(key=>this.approvedOutput(d,jobs,key)))).every(Boolean);
+    if(!(await Promise.all(step.data.requires.map(key=>this.approvedOutput(d,jobs,key)))).every(Boolean))return false;
+    if(['animation','avatar'].includes(execution.intent.request.operation)){
+      const shot=d.shots.find(s=>execution.intent.request.shot&&sameRef(s,execution.intent.request.shot)),audios=shot?.speech_segment_ids.map(id=>this.audioForSpeech(d,id))??[],duration=audios.reduce((sum,a)=>sum+(a?.file.duration_seconds??0),0);
+      const caps=await this.bindings[execution.intent.request.operation as 'animation'|'avatar']?.adapter.capabilities();
+      const ceiling=execution.intent.request.operation==='animation'?Math.min(step.data.duration_seconds,caps?.max_clip_seconds??Infinity):caps?.max_clip_seconds??Infinity;
+      if(audios.some(a=>!a)||duration>ceiling){if(execution.state==='prepared')await this.queue.explainPrepared(execution.id,'Áudio medido excede a duração fixada da operação. Rever cenas/plano e cotar nova operação; parâmetros autorizados não serão alterados.');return false;}
+    }
+    return true;
   }
   async advance(id:string){
     const token=randomUUID(),lease=await this.db.transaction(async client=>{
@@ -144,6 +153,7 @@ export class ProductionPipeline{
   private async ensureLease(client:SqlClient,id:string,token:string){if(!(await client.query('SELECT production_id FROM pipeline_leases WHERE production_id=$1 AND token=$2 AND lease_until>CURRENT_TIMESTAMP FOR UPDATE',[id,token])).rows.length)throw new ApplicationError('conflict','Avanço perdeu a posse da execução.');}
   private async ingest(execution:GenerationExecution,token:string){
     const job=execution.provider_job!,step=stepSchema.parse(execution.intent.request.parameters['_fbr']),binding=this.bindings[execution.intent.request.operation as keyof PipelineBindings];if(!binding)return;
+    const mode=AdapterCapabilitiesSchema.parse(await binding.adapter.capabilities()).mode;
     const {d}=await pipelineState(this.db,execution.intent.request.production.id);
     const already=(await this.db.query("SELECT id FROM media_heads WHERE kind='asset' AND production_id=$1 AND id=ANY($2::text[])",[execution.intent.request.production.id,job.output_assets.map(ref=>ref.id)])).rows;
     if(job.output_assets.length&&already.length===job.output_assets.length){
@@ -166,21 +176,47 @@ export class ProductionPipeline{
         if(!dependency||!await this.approvedOutput(d,persisted,key,client))throw new ApplicationError('ineligible','Input da publicação ainda não avaliado.');
         for(const input of d.assets.filter(a=>a.status==='approved'))if(await belongsToExecution(client,p.id,input,dependency)&&!dependencies.some(ref=>sameRef(ref,input)))dependencies.push({id:input.id,version:input.version});}
       const at=new Date().toISOString(),assets=measured.map(({output,type,probe,hash,storage_key})=>AssetSchema.parse({id:output.id,version:1,created_at:at,author:'production_pipeline',changes:[{at,author:'production_pipeline',reason:step.speech_id?`pipeline_speech:${step.speech_id}`:`pipeline_step:${step.step}`}],
-        status:'candidate',type,file:{storage_key,hash,bytes:output.bytes.length,...probe},origin:execution.intent.adapter_id.startsWith('sim_')?'fixture':'provider',execution:{id:job.id,version:job.version},
+        status:'candidate',type,file:{storage_key,hash,bytes:output.bytes.length,...probe},origin:mode==='simulated'?'fixture':'provider',execution:{id:job.id,version:job.version},
         specification:type==='audio'?{id:d.id,version:d.version+1}:step.specification,references:dependencies,configuration_hash:execution.intent.request.configuration_hash,usage:output.usage,evaluation_refs:[]}));
       await new PostgresMediaStore(this.db,this.files).commitWithin(client,p.id,assets.map(record=>({kind:'asset',record,expected_version:null})));
       await publish(client,p,{...d,assets:[...d.assets,...assets],jobs:[...d.jobs.filter(j=>j.id!==job.id),job]}, {},'Outputs copiados e medidos; avaliação pendente.');
     });
   }
   async candidates(id:string){const {p,d}=await pipelineState(this.db,id);return{production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version},items:d.assets.filter(a=>['audio','image','clip'].includes(a.type)&&a.status!=='outdated').map(a=>({...a,preview_url:`/api/productions/${encodeURIComponent(id)}/candidates/${encodeURIComponent(a.id)}?version=${a.version}`}))};}
+  async assemblyStatus(id:string){
+    const{p}=await pipelineState(this.db,id),runs=(await this.db.query('SELECT a.state,a.diagnostic,a.production_version,e.record FROM assembly_runs a LEFT JOIN assembly_evidence e USING(command_id) WHERE a.production_id=$1 ORDER BY a.started_at DESC LIMIT 20',[id])).rows;
+    return{production:{id:p.id,version:p.version},runs:runs.map(row=>{const evidence=row.record as {mix?:{status:string;integrated_lufs:number|null;true_peak_dbtp:number|null};quality_hash?:string}|null;
+      return{state:String(row.state),diagnostic:row.diagnostic?String(row.diagnostic):null,production_version:Number(row.production_version),mix:evidence?.mix??null,quality_hash:evidence?.quality_hash??null};})};
+  }
+  async cancelPending(raw:unknown){
+    const request=z.strictObject({command_id:z.string().min(1),production:ref,execution:ref,reason:z.string().trim().min(1).max(3000)}).parse(raw),fingerprint=sha256(canonical(request));
+    return this.db.transaction(async client=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[request.command_id]);const replay=(await client.query('SELECT fingerprint,result FROM pipeline_commands WHERE command_id=$1',[request.command_id])).rows[0];
+      if(replay){if(replay.fingerprint!==fingerprint)throw new ApplicationError('conflict','Comando reutilizado.');return ProductionSchema.parse(replay.result);}
+      const{p}=await pipelineState(client,request.production.id,true);if(!sameRef(p,request.production))throw new ApplicationError('conflict','Produção alterada.');
+      const owned=(await client.query('SELECT id FROM generation_heads WHERE id=$1 AND production_id=$2',[request.execution.id,p.id])).rows[0];if(!owned)throw new ApplicationError('not_found','Execução não pertence à produção.');
+      await this.queue.cancelPreparedWithin(client,request.execution.id,request.execution.version);
+      const updated=await pipelineState(client,p.id),saved=await publish(client,updated.p,updated.d,{},`Operação pendente cancelada antes de envio: ${request.reason}`);
+      await client.query('INSERT INTO pipeline_commands(command_id,production_id,fingerprint,result) VALUES($1,$2,$3,$4::jsonb)',[request.command_id,p.id,fingerprint,JSON.stringify(saved.p)]);return saved.p;
+    });
+  }
+  async refreshQuote(raw:unknown){
+    const request=z.strictObject({production:ref,execution:ref}).parse(raw),{p,d,snapshot}=await pipelineState(this.db,request.production.id),execution=await this.queue.get(request.execution.id);
+    if(!sameRef(p,request.production)||!execution||!sameRef(execution,request.execution)||execution.intent.request.production.id!==p.id||execution.state!=='prepared')throw new ApplicationError('conflict','Atualização exige operação preparada exata da produção atual.');
+    const binding=this.bindings[execution.intent.request.operation as keyof PipelineBindings];if(!binding)throw new ApplicationError('ineligible','Rota não configurada.');
+    const context:PipelineOperationContext={production:p,dossier:d,snapshot,operation:execution.intent.request.operation,shot:execution.intent.request.shot,step:stepSchema.parse(execution.intent.request.parameters['_fbr']),text:String(execution.intent.request.parameters['text']??execution.intent.request.parameters['prompt']??''),inputs:d.assets.filter(a=>a.status==='approved'&&execution.intent.request.input_assets.some(ref=>sameRef(ref,a))),attempt:execution.intent.request.attempt};
+    try{const estimate=await binding.estimate(context);if(estimate.currency!==execution.intent.request.currency||estimate.upper_minor!==execution.intent.request.reserved_minor)throw new Error('quote_price_changed');await binding.validateIntent?.(execution.intent);}
+    catch{throw new ApplicationError('ineligible','Cotação não corresponde à reserva fixada. Se preço ou inputs mudaram, cancelar a operação não enviada e solicitar nova tentativa.');}
+    return{ref:{id:execution.id,version:execution.version},refreshed:true,reserved_minor:execution.reserved_minor,currency:execution.intent.request.currency};
+  }
   async retry(raw:unknown){
-    const request=z.strictObject({command_id:z.string().min(1),production:ref,asset:ref,reason:z.string().trim().min(1).max(3000)}).parse(raw),fingerprint=sha256(canonical(request));
+    const request=z.strictObject({command_id:z.string().min(1),production:ref,asset:ref.optional(),execution:ref.optional(),reason:z.string().trim().min(1).max(3000)}).refine(value=>!!value.asset!==!!value.execution).parse(raw),fingerprint=sha256(canonical(request));
     const oldCommand=(await this.db.query('SELECT fingerprint,result FROM pipeline_commands WHERE command_id=$1',[request.command_id])).rows[0];
     if(oldCommand){if(oldCommand.fingerprint!==fingerprint)throw new ApplicationError('conflict','Comando reutilizado.');return ProductionSchema.parse(oldCommand.result);}
-    const {p,d,snapshot}=await pipelineState(this.db,request.production.id),asset=d.assets.find(a=>sameRef(a,request.asset)&&a.status==='rejected');
-    if(!sameRef(p,request.production)||!asset||!['producing','correcting'].includes(p.status))throw new ApplicationError('ineligible','Nova tentativa exige candidato rejeitado da produção atual.');
-    const executions=await this.queue.list(p.id),previous=executions.find(e=>e.provider_job?.id===asset.execution?.id);
-    if(!previous||!await belongsToExecution(this.db,p.id,asset,previous))throw new ApplicationError('ineligible','Proveniência da alternativa indisponível.');
+    const {p,d,snapshot}=await pipelineState(this.db,request.production.id),asset=request.asset?d.assets.find(a=>sameRef(a,request.asset!)&&a.status==='rejected'):null;
+    if(!sameRef(p,request.production)||request.asset&&!asset||!['producing','correcting'].includes(p.status))throw new ApplicationError('ineligible','Nova tentativa exige resultado rejeitado ou falha terminal da produção atual.');
+    const executions=await this.queue.list(p.id),previous=request.execution?executions.find(e=>sameRef(e,request.execution!)&&['failed','cancelled'].includes(e.state)):executions.find(e=>e.provider_job?.id===asset!.execution?.id);
+    if(!previous||asset&&!await belongsToExecution(this.db,p.id,asset,previous))throw new ApplicationError('ineligible','Proveniência da alternativa indisponível; resultado incerto exige reconciliação.');
     const attempt=Math.max(...executions.filter(e=>e.intent.request.execution_key===previous.intent.request.execution_key).map(e=>e.intent.request.attempt))+1;
     if(attempt>(snapshot.profile.budget?.max_attempts_per_job??1))throw new ApplicationError('attempts_exceeded','Limite de alternativas atingido; revisar a direção e o orçamento.');
     const step=stepSchema.parse(previous.intent.request.parameters['_fbr']),context:PipelineOperationContext={production:p,dossier:d,snapshot,operation:previous.intent.request.operation,shot:previous.intent.request.shot,step,text:String(previous.intent.request.parameters['text']??previous.intent.request.parameters['prompt']??''),inputs:d.assets.filter(a=>a.status==='approved'),attempt};
@@ -190,7 +226,8 @@ export class ProductionPipeline{
       if(replay){if(replay.fingerprint!==fingerprint)throw new ApplicationError('conflict','Comando reutilizado.');return ProductionSchema.parse(replay.result);}
       const current=await pipelineState(client,p.id,true);if(!sameRef(current.p,request.production))throw new ApplicationError('conflict','Produção alterada antes de reservar alternativa.');
       await this.queue.enqueueBatchWithin(client,[intent]);
-      const updated=await pipelineState(client,p.id);await client.query('INSERT INTO pipeline_commands(command_id,production_id,fingerprint,result) VALUES($1,$2,$3,$4::jsonb)',[request.command_id,p.id,fingerprint,JSON.stringify(updated.p)]);return updated.p;
+      const updated=await pipelineState(client,p.id),saved=await publish(client,updated.p,updated.d,{},`Alternativa ${attempt} solicitada dentro do plano: ${request.reason}`);
+      await client.query('INSERT INTO pipeline_commands(command_id,production_id,fingerprint,result) VALUES($1,$2,$3,$4::jsonb)',[request.command_id,p.id,fingerprint,JSON.stringify(saved.p)]);return saved.p;
     });
   }
   async candidateFile(id:string,assetRef:VersionRef){const {d}=await pipelineState(this.db,id),asset=d.assets.find(a=>sameRef(a,assetRef)&&['audio','image','clip'].includes(a.type));
@@ -215,7 +252,8 @@ export class ProductionPipeline{
     });await this.advance(result.id);return result;
   }
   private async assemble(p:Production,d:Dossier){
-    const service=new LocalAssemblyService(this.db,this.files);await service.reconcileInterrupted();
+    const service=new LocalAssemblyService(this.db,this.files,undefined,this.quality);await service.reconcileInterrupted();
+    if((await this.db.query("SELECT 1 FROM assembly_runs a JOIN assembly_evidence e USING(command_id) WHERE a.production_id=$1 AND a.state='failed' AND a.diagnostic LIKE 'assembly_quality_%' AND e.record->>'quality_hash'=$2 AND e.record->'dossier'->>'id'=$3 AND (e.record->'dossier'->>'version')::integer=$4 LIMIT 1",[p.id,assemblyQualityFingerprint(this.quality),d.id,d.version])).rows.length)return;
     const runs=(await this.db.query('SELECT state,command_id FROM assembly_runs WHERE production_id=$1 AND production_version=$2 ORDER BY started_at',[p.id,p.version])).rows;
     if(runs.some(run=>run.state==='running'))return;
     const audio=d.blocks.flatMap(b=>b.speeches).map(s=>{const a=this.audioForSpeech(d,s.id);if(!a)throw new Error('pipeline_audio_binding_missing');return{speech_segment_id:s.id,asset:{id:a.id,version:a.version}};}),
@@ -224,10 +262,11 @@ export class ProductionPipeline{
   }
   async prepareCorrection(id:string){
     const {p,d,snapshot}=await pipelineState(this.db,id),rows=(await this.db.query('SELECT r.record FROM correction_proposal_revisions r JOIN correction_proposal_heads h USING(id,version) WHERE h.production_id=$1',[id])).rows;
+    if(d.pending_issues.some(issue=>issue.required&&issue.code!=='correction_dependencies_outdated'))throw new ApplicationError('ineligible','Corrigir as pendências editoriais antes de estimar geração.');
     for(const row of rows){const correction=CorrectionSchema.parse(row.record);if(correction.status!=='proposed')continue;
       const visual=['image_mismatch','identity','environment','motion'].includes(correction.category),root=visual?d.timeline?.video.find(s=>correction.shot&&sameRef(s.shot,correction.shot))?.asset:{id:d.id,version:d.version};
       if(!root)throw new ApplicationError('ineligible','Raiz de correção indisponível.');
-      const impact=correctionImpact(d,[root]),affected=d.assets.filter(a=>(d.status==='outdated'?a.status==='outdated':impact.invalidated.some(ref=>ref.id===a.id))&&['audio','image','clip'].includes(a.type));
+      const impact=correctionImpact(d,[root]),affected=d.assets.filter(a=>a.status!=='rejected'&&(d.status==='outdated'?a.status==='outdated':impact.invalidated.some(ref=>ref.id===a.id))&&['audio','image','clip'].includes(a.type));
       const predicted=d.status==='outdated'?d:invalidateDossier(d,[root]);
       const intents:GenerationIntent[]=[];
       for(const old of [...affected].sort((a,b)=>({audio:0,image:1,clip:2}[a.type as 'audio'|'image'|'clip'])-({audio:0,image:1,clip:2}[b.type as 'audio'|'image'|'clip']))){
@@ -237,6 +276,11 @@ export class ProductionPipeline{
         const text=speechId?d.blocks.flatMap(b=>b.speeches).find(s=>s.id===speechId)!.text:shot!.intent;
         const dependencies=operation==='avatar'||operation==='animation'?intents.filter(intent=>intent.request.operation==='audio'||operation==='animation'&&intent.request.operation==='image'&&intent.request.shot?.id===shot?.id).map(intent=>intent.request.execution_key):[];
         const context=this.context(p,predicted,snapshot,operation,label,shot?{id:shot.id,version:shot.version}:null,dependencies,text,old);
+        // Animação com áudio futuro usa o limite cotado da rota; não altera duração após autorização.
+        if(operation==='animation'&&dependencies.some(key=>intents.some(intent=>intent.request.execution_key===key&&intent.request.operation==='audio'))){
+          const maximum=(await this.bindings.animation?.adapter.capabilities())?.max_clip_seconds;
+          if(!maximum)throw new ApplicationError('ineligible','Correção animada exige limite de duração verificável antes de cotar áudio futuro.');context.step.duration_seconds=maximum;
+        }
         context.step.step=sha256(`${context.step.step}:correction:${correction.id}`);
         intents.push(await this.intent(context));
       }
@@ -264,7 +308,9 @@ export class ProductionPipeline{
   }
   async recover(){
     await new LocalAssemblyService(this.db,this.files).reconcileInterrupted();
-    const rows=(await this.db.query("SELECT h.id FROM production_heads h JOIN production_revisions r USING(id,version) WHERE r.record->>'status' IN ('producing','correcting') ORDER BY h.id LIMIT 100")).rows;
-    const errors=[];for(const row of rows)try{await this.advance(String(row.id));}catch{errors.push(String(row.id));}return{checked:rows.length,pending:errors.length};
+    let cursor='',checked=0,pending=0;
+    for(;;){const rows=(await this.db.query("SELECT h.id FROM production_heads h JOIN production_revisions r USING(id,version) WHERE h.id>$1 AND r.record->>'status' IN ('producing','correcting') ORDER BY h.id LIMIT 100",[cursor])).rows;
+      if(!rows.length)break;for(const row of rows){cursor=String(row.id);checked++;try{await this.advance(cursor);}catch{pending++;}}if(rows.length<100)break;
+    }return{checked,pending};
   }
 }

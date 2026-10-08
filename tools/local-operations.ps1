@@ -28,7 +28,14 @@ if($Action -eq 'start') {
   $record=$managed | Where-Object {$_.name -eq $service.name} | Select-Object -Last 1
   if($record){$existing=Get-Process -Id $record.process_id -ErrorAction SilentlyContinue;if($existing -and $existing.StartTime.ToUniversalTime().ToString('o') -eq $record.started_at){continue}}
   if($service.name -ne 'database' -and -not (Test-LocalPort 55432)){throw 'Banco local indisponível. Inicie dev:db ou use -StartDatabase.'}
-  if($service.name -eq 'worker'){$priorMode=$env:FBR_GENERATION_MODE;$env:FBR_GENERATION_MODE='simulated'}
+  if($service.name -eq 'worker'){
+   $priorMode=$env:FBR_GENERATION_MODE
+   if(-not $priorMode){
+    $configuredMode='simulated';$environmentFile=Join-Path $workspace '.env'
+    if(Test-Path -LiteralPath $environmentFile){foreach($environmentLine in Get-Content -LiteralPath $environmentFile){if($environmentLine -match '^\s*FBR_GENERATION_MODE\s*=\s*["'']?(simulated|synthetic|provisioned)["'']?\s*$'){$configuredMode=$Matches[1]}}}
+    $env:FBR_GENERATION_MODE=$configuredMode
+   }
+  }
   try{$process=Start-Process -FilePath $nodePath -ArgumentList $service.args -WorkingDirectory $workspace -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $stateDirectory "$($service.name).stdout.log") -RedirectStandardError (Join-Path $stateDirectory "$($service.name).stderr.log")}
   finally{if($service.name -eq 'worker'){$env:FBR_GENERATION_MODE=$priorMode}}
   $managed=@($managed | Where-Object {$_.name -ne $service.name})+@(@{name=$service.name;process_id=$process.Id;started_at=$process.StartTime.ToUniversalTime().ToString('o');executable=$nodePath;workspace=$workspace})

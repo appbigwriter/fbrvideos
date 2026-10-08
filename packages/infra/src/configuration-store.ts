@@ -37,7 +37,8 @@ export async function migrateConfiguration(db: SqlDatabase): Promise<void> {
   const providerEvents=await readFile(new URL('../migrations/012_provider_events.sql',import.meta.url),'utf8');
   const pipeline=await readFile(new URL('../migrations/013_pipeline.sql',import.meta.url),'utf8');
   const budget=await readFile(new URL('../migrations/014_budget.sql',import.meta.url),'utf8');
-  await db.transaction(async client => { await client.query('SELECT pg_advisory_xact_lock(6401201)'); await client.query(sql); await client.query(productions); await client.query(inference); await client.query(generation); await client.query(media); await client.query(review); await client.query(corrections); await client.query(assembly); await client.query(execution); await client.query(httpIntents);await client.query(operations);await client.query(providerEvents);await client.query(pipeline);await client.query(budget); });
+  const evidence=await readFile(new URL('../migrations/015_runtime_evidence.sql',import.meta.url),'utf8');
+  await db.transaction(async client => { await client.query('SELECT pg_advisory_xact_lock(6401201)'); await client.query(sql); await client.query(productions); await client.query(inference); await client.query(generation); await client.query(media); await client.query(review); await client.query(corrections); await client.query(assembly); await client.query(execution); await client.query(httpIntents);await client.query(operations);await client.query(providerEvents);await client.query(pipeline);await client.query(budget);await client.query(evidence); });
 }
 export function configurationReader(client: SqlClient) {
   return {

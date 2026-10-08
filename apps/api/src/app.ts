@@ -1,10 +1,10 @@
-import Fastify from 'fastify';
+import Fastify,{type FastifyReply} from 'fastify';
 import { z } from 'zod';
 import {OperatorAccess} from './access.js';
 import { CONTRACT_VERSION, EntityKindSchema, IdSchema, ArticleSchema, CharacterSchema, ReferenceSchema, ProfileSchema,
   ArticleListSchema, ArticleFilterOptionsSchema, UniverseSchema, ProfilesSchema, ErrorSchema, type Article, type EntityKind } from '@fbr/contracts';
 import { ApplicationError, ConfigurationService, articleEligibility, ProductionService } from '@fbr/domain';
-import { captureArticle,OperationalTelemetry,parseMediaRange, type PostgresReviewWorkflow,type ProductionPipeline,type CalibrationService } from '@fbr/infra';
+import { captureArticle,OperationalTelemetry,parseMediaRange, type PostgresReviewWorkflow,type ProductionPipeline,type CalibrationService,type PostgresBudgetWorkflow } from '@fbr/infra';
 import { getPipelineCatalog, checkAudiovisualConfiguration, AutomaticPlanner } from '@fbr/pipeline';
 import { AudiovisualCheckRequestSchema, ProductionsListSchema, ProductionSchema, GenerationListSchema,
   ReviewViewSchema, ReviewPointSchema, DeliveryViewSchema, CorrectionSchema, RenderHistorySchema,SpeechEditViewSchema,
@@ -17,10 +17,12 @@ const versionQuery = z.strictObject({ version: z.coerce.number().int().positive(
 const routeParams = z.strictObject({ id: IdSchema });
 const schemas = { articles: ArticleSchema, characters: CharacterSchema, references: ReferenceSchema, profiles: ProfileSchema };
 
-export function buildApp(service: ConfigurationService, options: { capture?: typeof captureArticle; allowedOrigins?: string[];allowedHosts?:string[];accessToken?:string;secureCookie?:boolean; productions?: ProductionService; planner?: AutomaticPlanner; generation?: GenerationQueue; review?: PostgresReviewWorkflow;operationalState?:()=>Promise<unknown>;prepareCorrection?:(id:string)=>Promise<void>;pipeline?:ProductionPipeline;calibration?:CalibrationService;readiness?:()=>Promise<unknown>;retentionPlan?:()=>Promise<unknown> } = {}) {
+export function buildApp(service: ConfigurationService, options: { capture?: typeof captureArticle; allowedOrigins?: string[];allowedHosts?:string[];accessToken?:string;secureCookie?:boolean; productions?: ProductionService; planner?: AutomaticPlanner; generation?: GenerationQueue; review?: PostgresReviewWorkflow;operationalState?:()=>Promise<unknown>;prepareCorrection?:(id:string)=>Promise<void>;pipeline?:ProductionPipeline;calibration?:CalibrationService;readiness?:()=>Promise<unknown>;retentionPlan?:()=>Promise<unknown>;budget?:PostgresBudgetWorkflow;providerCallback?:import('@fbr/infra').ProviderRuntime['receiveCallback'];recordTelemetry?:(snapshot:ReturnType<OperationalTelemetry['snapshot']>)=>Promise<unknown>;operationalHistory?:()=>Promise<unknown> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
   const allowedOrigins = options.allowedOrigins ?? ['http://127.0.0.1:5173','http://localhost:5173'];
   const telemetry=new OperationalTelemetry();
+  if(options.recordTelemetry){const metricsTimer=setInterval(()=>{void options.recordTelemetry!(telemetry.snapshot()).catch(()=>{});},60000);metricsTimer.unref();app.addHook('onClose',async()=>{clearInterval(metricsTimer);});}
+  if(options.operationalHistory)app.get('/api/operations/history',async()=>options.operationalHistory!());
   const access=options.accessToken?new OperatorAccess(options.accessToken,options.secureCookie??true):null;
   const allowedHosts=options.allowedHosts??['localhost','127.0.0.1'];
   app.addHook('onResponse',async(request,reply)=>{telemetry.observe(request.method,request.routeOptions.url??'unmatched',reply.statusCode,reply.elapsedTime);});
@@ -34,7 +36,8 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
       .header('Access-Control-Allow-Headers','Content-Type,Authorization').code(204).send();
     if(request.headers['sec-fetch-site']==='cross-site'&&request.method!=='GET')return reply.code(403).send({message:'Origem não permitida.'});
     const publicSession=request.url==='/api/session'&&['GET','POST'].includes(request.method);
-    if(access&&!publicSession&&request.url!=='/health'&&!access.authenticated(request.headers.authorization,request.headers.cookie))
+    const callback=options.providerCallback&&request.method==='POST'&&/^\/api\/provider-callbacks\/[\w.:-]+$/.test(request.url);
+    if(access&&!publicSession&&!callback&&request.url!=='/health'&&!access.authenticated(request.headers.authorization,request.headers.cookie))
       return reply.code(401).header('Cache-Control','no-store').send({message:'Autentique-se para acessar esta instalação.'});
   });
   app.get('/api/session',async(request,reply)=>reply.header('Cache-Control','no-store').send({required:!!access,authenticated:!access||access.authenticated(request.headers.authorization,request.headers.cookie)}));
@@ -58,6 +61,10 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
   });
   app.get('/health', async () => ({ status: 'ok', contract_version: CONTRACT_VERSION }));
   if(options.readiness)app.get('/api/readiness',async()=>options.readiness!());
+  app.get('/api/productions/:id/generation/status',async request=>{const{id}=routeParams.parse(request.params);if(options.productions)await options.productions.detail(id);return{configured:!!options.pipeline,reason:options.pipeline?null:'Conexões de geração não configuradas nesta instalação.'};});
+  if(!options.pipeline)app.post('/api/productions/:id/generation/start',async()=>{throw new ApplicationError('ineligible','Conexões de geração não configuradas. Conferir a configuração da instalação antes de iniciar mídia.');});
+  if(options.providerCallback)app.post('/api/provider-callbacks/:adapterId',async(request,reply)=>{const{adapterId}=z.strictObject({adapterId:IdSchema}).parse(request.params);try{return await options.providerCallback!(adapterId,request.body,request.headers);}catch{return reply.code(401).send({message:'Callback não autenticado ou incompatível.'});}});
+  if(options.budget)app.post('/api/productions/:id/budget',async request=>{const{id}=routeParams.parse(request.params);const body=z.object({production:routeParams.passthrough()}).passthrough().parse(request.body);if(body.production.id!==id)throw new ApplicationError('validation','Orçamento aponta para outra produção.');return options.budget!.revise(request.body);});
   if(options.retentionPlan)app.get('/api/retention/plan',async()=>options.retentionPlan!());
   if(options.calibration){const calibration=options.calibration;
     const evidenceAction=async<T>(run:()=>Promise<T>)=>{try{return await run();}catch(error){if(error instanceof z.ZodError)throw error;throw new ApplicationError('ineligible','Evidência de calibração incompatível, insuficiente ou alterada.');}};
@@ -70,8 +77,12 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
     const pipelineCommand=(id:string,raw:unknown)=>{const parsed=z.object({production:z.object({id:IdSchema})}).passthrough().parse(raw);if(parsed.production.id!==id)throw new ApplicationError('validation','Comando aponta para outra produção.');return raw;};
     app.post('/api/productions/:id/generation/start',async request=>{const{id}=routeParams.parse(request.params);return pipeline.start(pipelineCommand(id,request.body));});
     app.get('/api/productions/:id/candidates',async request=>pipeline.candidates(routeParams.parse(request.params).id));
+    app.get('/api/productions/:id/assembly',async request=>pipeline.assemblyStatus(routeParams.parse(request.params).id));
     app.post('/api/productions/:id/candidates/evaluate',async request=>{const{id}=routeParams.parse(request.params);return pipeline.evaluate(pipelineCommand(id,request.body));});
     app.post('/api/productions/:id/candidates/retry',async request=>{const{id}=routeParams.parse(request.params);return pipeline.retry(pipelineCommand(id,request.body));});
+    app.post('/api/productions/:id/jobs/retry',async request=>{const{id}=routeParams.parse(request.params);return pipeline.retry(pipelineCommand(id,request.body));});
+    app.post('/api/productions/:id/jobs/cancel-pending',async request=>{const{id}=routeParams.parse(request.params);return pipeline.cancelPending(pipelineCommand(id,request.body));});
+    app.post('/api/productions/:id/jobs/refresh-quote',async request=>{const{id}=routeParams.parse(request.params);return pipeline.refreshQuote(pipelineCommand(id,request.body));});
     app.get('/api/productions/:id/candidates/:assetId',async(request,reply)=>{
       const{id,assetId}=z.strictObject({id:IdSchema,assetId:IdSchema}).parse(request.params),query=z.strictObject({version:z.coerce.number().int().positive()}).parse(request.query);
       const asset=await pipeline.candidateFile(id,{id:assetId,version:query.version});reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff').type(asset.mime_type).header('Accept-Ranges','bytes');
@@ -81,6 +92,14 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
   }
   if(options.review) {
     const review=options.review;
+    const sendMedia=async(reply:FastifyReply,open:()=>ReturnType<PostgresReviewWorkflow['openCurrentAsset']>,downloadName?:string)=>{
+      try{const file=await open();reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff').header('Accept-Ranges','bytes').type(file.mime_type);
+        if(downloadName){const extension=file.mime_type==='text/vtt'?'vtt':file.mime_type==='application/x-subrip'?'srt':'mp4';reply.header('Content-Disposition',`attachment; filename="${downloadName}.${extension}"`);}
+        if(file.range)reply.code(206).header('Content-Range',`bytes ${file.range.start}-${file.range.end}/${file.total_bytes}`);
+        reply.header('Content-Length',file.range?file.range.end-file.range.start+1:file.total_bytes);
+        return reply.send('stream' in file?file.stream:Buffer.from(file.bytes));
+      }catch(error){if(error instanceof Error&&error.message==='media_range_unsatisfiable'&&'total_bytes' in error)return reply.code(416).header('Content-Range',`bytes */${error.total_bytes}`).send();throw error;}
+    };
     const ownCommand=(id:string,raw:unknown)=>{
       const parsed=z.object({production:z.object({id:IdSchema})}).passthrough().parse(raw);
       if(parsed.production.id!==id) throw new ApplicationError('validation','Comando aponta para outra produção.');
@@ -98,9 +117,7 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
     });
     app.get('/api/productions/:id/review/history/:version/video',async(request,reply)=>{
       const {id,version}=z.strictObject({id:IdSchema,version:z.coerce.number().int().positive()}).parse(request.params);
-      const asset=await review.historicalAsset(id,version);
-      return reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff')
-        .type(asset.mime_type).send(Buffer.from(asset.bytes));
+      return sendMedia(reply,()=>review.openHistoricalAsset(id,version,request.headers.range));
     });
     app.post('/api/productions/:id/review/points',async request=>{
       const {id}=routeParams.parse(request.params); return ReviewPointSchema.parse(await review.addPoint(ownCommand(id,request.body)));
@@ -132,23 +149,7 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
     app.get('/api/productions/:id/assets/:assetId',async(request,reply)=>{
       const {id,assetId}=z.strictObject({id:IdSchema,assetId:IdSchema}).parse(request.params);
       const query=z.strictObject({version:z.coerce.number().int().positive(),download:z.literal('1').optional()}).parse(request.query);
-      const asset=await review.asset(id,{id:assetId,version:query.version});
-      reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff')
-        .header('Accept-Ranges','bytes').type(asset.mime_type);
-      const extension=asset.mime_type==='text/vtt'?'vtt':asset.mime_type==='application/x-subrip'?'srt':'mp4';
-      if(query.download) reply.header('Content-Disposition',`attachment; filename="${assetId}-v${query.version}.${extension}"`);
-      const range=request.headers.range;
-      if(range) {
-        const match=/^bytes=(\d*)-(\d*)$/.exec(range);
-        const length=asset.bytes.length;
-        if(!match||(!match[1]&&!match[2])) return reply.code(416).header('Content-Range',`bytes */${length}`).send();
-        const start=match[1]?Number(match[1]):Math.max(0,length-Number(match[2]));
-        const end=match[1]?match[2]?Math.min(Number(match[2]),length-1):length-1:length-1;
-        if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>=length||start>end||(!match[1]&&Number(match[2])===0))
-          return reply.code(416).header('Content-Range',`bytes */${length}`).send();
-        return reply.code(206).header('Content-Range',`bytes ${start}-${end}/${length}`).send(Buffer.from(asset.bytes.subarray(start,end+1)));
-      }
-      return reply.send(Buffer.from(asset.bytes));
+      return sendMedia(reply,()=>review.openCurrentAsset(id,{id:assetId,version:query.version},request.headers.range),query.download?`${assetId}-v${query.version}`:undefined);
     });
     app.get('/api/productions/:id/manifests/:manifestId',async(request,reply)=>{
       const {id,manifestId}=z.strictObject({id:IdSchema,manifestId:IdSchema}).parse(request.params);

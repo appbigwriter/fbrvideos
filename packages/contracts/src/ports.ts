@@ -53,6 +53,8 @@ export interface GenerationAdapter {
   query(externalJobId: string): Promise<AdapterResult>;
   cancel(externalJobId: string): Promise<AdapterResult>;
   recover?(request:AdapterRequest):Promise<AdapterResult>;
+  /** Query-only lookup of a previously persisted receipt; must never submit generation. */
+  lookupReceipt?(request:AdapterRequest):Promise<AdapterResult|null>;
 }
 export interface ImmutableRepository<T extends VersionRef> {
   get(ref: VersionRef): Promise<T | null>;

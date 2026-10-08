@@ -18,7 +18,7 @@ export async function inventoryAssets(directory:string):Promise<InventoryFile[]>
 }
 export async function retentionReferences(db:Pick<SqlDatabase,'query'>,backupKeys:ReadonlySet<string>){
  const keys=new Set(backupKeys);
- for(const row of (await db.query("SELECT record->'file'->>'storage_key' AS storage_key FROM media_revisions WHERE kind='asset' UNION SELECT storage_key FROM delivery_manifests")).rows)
+ for(const row of (await db.query("SELECT record->'file'->>'storage_key' AS storage_key FROM media_revisions WHERE kind='asset' UNION SELECT storage_key FROM delivery_manifests UNION SELECT output->>'storage_key' AS storage_key FROM synthetic_generation_results CROSS JOIN LATERAL jsonb_array_elements(record->'outputs') output")).rows)
   if(typeof row.storage_key==='string')keys.add(row.storage_key);
  return keys;
 }
@@ -41,7 +41,7 @@ export class RetentionService{
   // SHARE bloqueia INSERT/UPDATE/DELETE dos publishers. O lock cobre a última checagem e unlink.
   await this.db.transaction(async client=>{
    await client.query("SET LOCAL lock_timeout='5s'");
-   await client.query('LOCK TABLE media_heads,media_revisions,delivery_manifests IN SHARE MODE');
+   await client.query('LOCK TABLE media_heads,media_revisions,delivery_manifests,synthetic_generation_results IN SHARE MODE');
    const refs=await retentionReferences(client,backup.keys);
    for(const item of dry.plan.filter(item=>item.action==='eligible_for_removal')){
     if(refs.has(item.storage_key)){skipped.push(item.storage_key);continue;}

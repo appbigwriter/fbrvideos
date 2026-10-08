@@ -20,7 +20,8 @@ export const GenerationExecutionSchema = z.strictObject({
 export type GenerationIntent = z.infer<typeof GenerationIntentSchema>;
 export type GenerationExecution = z.infer<typeof GenerationExecutionSchema>;
 /** Política server-side provisionável; ausência mantém adapters reais fechados. */
-export type GenerationAdmission=(intent:GenerationIntent,production:Production)=>Promise<boolean>;
+export interface GenerationAdmissionContext{quote(adapterId:string,executionKey:string,attempt:number):Promise<unknown>}
+export type GenerationAdmission=(intent:GenerationIntent,production:Production,context?:GenerationAdmissionContext)=>Promise<boolean>;
 export const GenerationSummarySchema = z.strictObject({
   ref: VersionRefSchema, production: VersionRefSchema, operation: AdapterOperationSchema,
   state: GenerationExecutionSchema.shape.state, attempt: z.int().positive(), simulated: z.boolean(),

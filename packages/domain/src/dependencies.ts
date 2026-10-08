@@ -77,7 +77,7 @@ export function invalidateDossier(raw: Dossier, roots: VersionRef[]): Dossier {
   return DossierSchema.parse({ ...dossier, version: dossier.version + 1, status: 'outdated', created_at: at,
     changes: [...dossier.changes, { at, author: 'dependency_graph', reason: 'Correção invalida derivados por revisão; histórico preservado.' }],
     shots:dossier.shots.map(shot=>invalid(shot)?{...revision(shot),status:'specified'}:shot),
-    assets: dossier.assets.map(asset => invalid(asset) ? { ...revision(asset), status: 'outdated' } : asset),
+    assets: dossier.assets.map(asset => invalid(asset)&&asset.status!=='rejected' ? { ...revision(asset), status: 'outdated' } : asset),
     timeline: dossier.timeline && invalid(dossier.timeline) ? { ...revision(dossier.timeline), status: 'outdated' } : dossier.timeline,
     approvals: dossier.approvals.map(approval => invalid(approval) ? { ...revision(approval), status: 'invalidated' } : approval),
     pending_issues: [...dossier.pending_issues, { code: 'correction_dependencies_outdated', message: 'Há derivados invalidados pela correção.',

@@ -1,5 +1,7 @@
 # FBR Videos — sprints para implementação por três agentes
 
+Entrega técnica em 7/10/2026: [TL-01–TL-18 implementadas/integradas ou provisionadas](arquitetura/entrega-tasklist-2026-10-07.md), com jornada sintética pública até entrega e correção. Gates de fornecedores/qualidade humana continuam separados.
+
 Auditoria e próxima execução em 6/10/2026: [tasklist remanescente](tasklist-remanescente-2026-10-06.md), com 18 tarefas de código e quatro grupos de dependências externas. Orquestração inicial, normalização dos adapters e integração de outputs/correções ainda estão abertas; as fundações entregues devem ser preservadas.
 
 Estado de execução atualizado em 6/10/2026: [continuação autônoma e provisionamento de S2–S6](arquitetura/continuacao-sprints-autonomas-2026-10-06.md). As dependências externas não bloqueiam as frentes internas; aceite integral das sprints continua distinto da entrega técnica.

@@ -52,9 +52,9 @@ export class LocalImmutableAssetStore implements AssetStore {
     return readFile(resolved);
   }
   async exists(asset: Asset) {
-    try { const bytes = await this.read(asset.file.storage_key); return bytes.byteLength === asset.file.bytes && hash(bytes) === asset.file.hash; }
+    try {const opened=await this.openVerified(asset);await new Promise<void>(resolve=>{opened.stream.once('close',resolve);opened.stream.destroy();});return true;}
     catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false;
+      if (error instanceof Error && (error.message==='asset_hash_mismatch'||'code' in error && error.code === 'ENOENT')) return false;
       throw error;
     }
   }

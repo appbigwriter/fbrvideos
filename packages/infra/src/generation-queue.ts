@@ -74,7 +74,7 @@ export class PostgresGenerationQueue implements GenerationQueue {
           throw new ApplicationError('conflict', 'Chave de execução já utilizada com outra intenção.');
         return (await execution(client, String(previous.id)))!;
       }
-      if(!intent.adapter_id.startsWith('sim_')&&(!this.admission||!await this.admission(intent,production)))
+      if(!intent.adapter_id.startsWith('sim_')&&(!this.admission||!await this.admission(intent,production,{quote:async(adapter,key,attempt)=>(await client.query('SELECT record FROM provider_quotes WHERE adapter_id=$1 AND execution_key=$2 AND attempt=$3',[adapter,key,attempt])).rows[0]?.record})))
         throw new ApplicationError('ineligible','Adapter real exige liberação server-side da conta, perfil e custo.');
       if (request.production.version !== production.version) throw new ApplicationError('conflict', 'Revisão da produção desatualizada.');
       if (!['preparing', 'awaiting_decision', 'producing','correcting'].includes(production.status))
@@ -86,8 +86,12 @@ export class PostgresGenerationQueue implements GenerationQueue {
       const jobs = await executions(client, production.id);
       const earlier = jobs.filter(job => job.intent.request.execution_key === request.execution_key);
       const last = earlier.sort((a, b) => b.intent.request.attempt - a.intent.request.attempt)[0];
-      if (request.attempt !== (last?.intent.request.attempt ?? 0) + 1 || (last && !['failed', 'cancelled'].includes(last.state)))
-        throw new ApplicationError('conflict', 'Nova tentativa exige falha ou cancelamento reconciliado da anterior.');
+      if (request.attempt !== (last?.intent.request.attempt ?? 0) + 1)throw new ApplicationError('conflict','Sequência de tentativas inválida.');
+      if(last&&!['failed','cancelled'].includes(last.state)){
+        const outputs=last.provider_job?.output_assets??[];
+        const rejected=last.state==='succeeded'&&outputs.length>0&&Number((await client.query("SELECT count(*)::integer AS count FROM media_revisions r JOIN media_heads h USING(kind,id,version) WHERE h.kind='asset' AND h.production_id=$1 AND h.id=ANY($2::text[]) AND r.record->>'status'='rejected'",[production.id,outputs.map(ref=>ref.id)])).rows[0]?.count)===outputs.length;
+        if(!rejected)throw new ApplicationError('conflict','Nova tentativa exige falha, cancelamento ou outputs rejeitados e reconciliados.');
+      }
       if (jobs.some(job => job.state === 'unknown')) throw new ApplicationError('provider_unknown', 'Custo incerto: reconciliar antes de reservar novo gasto.');
       const committed = jobs.reduce((sum, job) => sum + job.reserved_minor, 0);
       const confirmed = jobs.reduce((sum, job) => sum + job.confirmed_minor, 0);
@@ -192,5 +196,16 @@ export class PostgresGenerationQueue implements GenerationQueue {
       return { ...current, state: 'cancelled', reserved_minor: 0, diagnostic: 'Cancelado antes do envio.' };
     });
     return changed ?? (await this.get(id))!;
+  }
+  async explainPrepared(id:string,diagnostic:string){
+    if(!diagnostic.trim()||diagnostic.length>2000)throw new ApplicationError('validation','Diagnóstico inválido.');
+    return (await this.change(id,async(_client,current)=>current.state==='prepared'&&current.diagnostic!==diagnostic?{...current,diagnostic}:null))??await this.get(id);
+  }
+  async cancelPreparedWithin(client:SqlClient,id:string,expectedVersion:number){
+    const current=await execution(client,id);if(!current)throw new ApplicationError('not_found','Execução não encontrada.');
+    const production=await lockProduction(client,current.intent.request.production.id);
+    if(current.version!==expectedVersion||current.state!=='prepared')throw new ApplicationError('conflict','Somente execução preparada exata pode ser cancelada sem consulta externa.');
+    const next=GenerationExecutionSchema.parse({...current,version:current.version+1,state:'cancelled',reserved_minor:0,diagnostic:'Cancelamento explícito antes de envio; reserva liberada.'});
+    await append(client,next);await updateCosts(client,production);return next;
   }
 }
