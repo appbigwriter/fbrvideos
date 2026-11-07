@@ -1,0 +1,22 @@
+import {resolve} from 'node:path';
+import {access} from 'node:fs/promises';
+const checks=[];
+const check=(component,ready)=>checks.push({component,ready});
+const placeholder=value=>!value||/SUBSTITUA|CHANGE_ME|EXAMPLE/i.test(value);
+const password=process.env.POSTGRES_PASSWORD??'',token=process.env.FBR_OPERATOR_ACCESS_TOKEN??'';
+check('postgres_password_url_safe',!placeholder(password)&&/^[A-Za-z0-9_-]{24,}$/.test(password));
+check('operator_access_key',!placeholder(token)&&token.length>=32);
+const hosts=(process.env.FBR_ALLOWED_HOSTS??'localhost,127.0.0.1').split(',').map(value=>value.trim());
+const origins=(process.env.FBR_ALLOWED_ORIGINS??'https://localhost:8443,https://127.0.0.1:8443').split(',').map(value=>value.trim());
+check('allowed_hosts',hosts.length>0&&hosts.every(host=>host&&!host.includes('/')&&!host.includes('*')));
+check('https_origins',origins.length>0&&origins.every(value=>{try{const url=new URL(value);return url.protocol==='https:'&&url.origin===value&&hosts.includes(url.hostname);}catch{return false;}}));
+const port=Number(process.env.FBR_HTTPS_PORT??8443);
+check('https_port',Number.isInteger(port)&&port>0&&port<=65535);
+check('generation_mode',['simulated','synthetic','provisioned'].includes(process.env.FBR_GENERATION_MODE??'synthetic'));
+check('planner_mode',['extractive','codex_oauth'].includes(process.env.FBR_PLANNER??'extractive'));
+check('provider_bindings',process.env.FBR_GENERATION_MODE!=='provisioned'||!!process.env.FBR_PROVIDER_BINDINGS_MODULE?.trim());
+check('codex_executable',process.env.FBR_PLANNER!=='codex_oauth'||!!process.env.FBR_CODEX_EXECUTABLE?.trim());
+const certDirectory=resolve(process.env.FBR_TLS_DIRECTORY??'deploy/certs');
+for(const file of ['fullchain.pem','privkey.pem']){try{await access(resolve(certDirectory,file));check(file,true);}catch{check(file,false);}}
+console.log(JSON.stringify({ready:checks.every(item=>item.ready),checks,limitations:['Preflight verifica configuração e presença dos certificados; não comprova validade TLS, acesso a fornecedores, orçamento, qualidade ou disponibilidade do worker.']},null,2));
+if(checks.some(item=>!item.ready))process.exitCode=1;

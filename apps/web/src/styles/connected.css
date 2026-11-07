@@ -8,3 +8,4 @@
 .connected-actions button:hover:not(:disabled),.connected-button:hover,.connected-page>button:hover,.connected-cards button:hover{background:var(--color-bg-surface-hover)}
 .connected-actions button:disabled,.connected-button:disabled{opacity:.5;cursor:not-allowed}.connected-page>a,.connected-cards a{color:var(--color-accent-hover)}
 @media(max-width:700px){.connected-columns{grid-template-columns:1fr}.connected-form{padding:1rem}}
+.connected-page a{color:var(--color-accent-hover)}.connected-page video,.connected-page img{max-width:100%}.connected-page label{overflow-wrap:anywhere}

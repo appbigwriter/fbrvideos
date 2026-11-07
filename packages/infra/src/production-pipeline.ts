@@ -2,7 +2,8 @@ import {randomUUID,createHash} from 'node:crypto';
 import {z} from 'zod';
 import {ProductionSchema,ProductionSnapshotSchema,DossierSchema,AssetSchema,EvaluationSchema,GenerationIntentSchema,CorrectionSchema,CorrectionExecutionPlanSchema,AdapterCapabilitiesSchema,
   GenerationExecutionSchema,type Production,type Dossier,type Asset,type GenerationIntent,type GenerationExecution,type GenerationAdapter,type AssetStore,type VersionRef,type ProductionSnapshot} from '@fbr/contracts';
-import {ApplicationError,canonical,sha256,sameRef,correctionImpact,invalidateDossier} from '@fbr/domain';
+import {ApplicationError,canonical,sha256,sameRef,correctionImpact,invalidateDossier,recurringExecutionPolicy} from '@fbr/domain';
+import {CandidateAssessmentSchema,assessmentDecision,type CandidateAssessor} from './candidate-assessment.js';
 import {belongsToExecution} from './asset-provenance.js';
 import {PostgresGenerationQueue} from './generation-queue.js';
 import {PostgresReviewWorkflow} from './review-workflow.js';
@@ -18,6 +19,7 @@ const stepSchema=z.object({step:z.string(),requires:z.array(z.string()),specific
 type Step=z.infer<typeof stepSchema>;
 export interface PipelineOperationContext{production:Production;dossier:Dossier;snapshot:ProductionSnapshot;operation:GenerationIntent['request']['operation'];shot:VersionRef|null;step:Step;text:string;inputs:Asset[];attempt?:number}
 export interface PipelineAdapterBinding{adapter:GenerationAdapter;outputs:PipelineOutputResolver;
+  assessor?:CandidateAssessor;
   estimate(context:PipelineOperationContext):Promise<GenerationIntent['estimate']>;
   validateIntent?(intent:GenerationIntent):Promise<void>;
   parameters?(context:PipelineOperationContext):Promise<GenerationIntent['request']['parameters']>;}
@@ -115,6 +117,8 @@ export class ProductionPipeline{
       let {p,d,snapshot}=await pipelineState(this.db,id);if(!['producing','correcting'].includes(p.status))return;
       const jobs=await this.queue.list(id);
       for(const execution of jobs)if(execution.provider_job?.status==='succeeded'&&stepSchema.safeParse(execution.intent.request.parameters['_fbr']).success)await this.ingest(execution,token);
+      await this.assessCandidates(id,token);
+      await this.retryRecoverable(id);
       ({p,d,snapshot}=await pipelineState(this.db,id));
       if(p.stage==='assembly'){await this.assemble(p,d);return;}
       if(p.status==='correcting'){await this.finishCorrection(p,d);return;}
@@ -182,7 +186,61 @@ export class ProductionPipeline{
       await publish(client,p,{...d,assets:[...d.assets,...assets],jobs:[...d.jobs.filter(j=>j.id!==job.id),job]}, {},'Outputs copiados e medidos; avaliação pendente.');
     });
   }
-  async candidates(id:string){const {p,d}=await pipelineState(this.db,id);return{production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version},items:d.assets.filter(a=>['audio','image','clip'].includes(a.type)&&a.status!=='outdated').map(a=>({...a,preview_url:`/api/productions/${encodeURIComponent(id)}/candidates/${encodeURIComponent(a.id)}?version=${a.version}`}))};}
+  private async assessCandidates(id:string,token:string){
+    const initial=await pipelineState(this.db,id),policy=recurringExecutionPolicy(initial.snapshot);
+    if(!policy)return;
+    const executions=await this.queue.list(id);
+    for(const asset of initial.d.assets.filter(a=>a.status==='candidate')){
+      const execution=executions.find(e=>e.provider_job?.id===asset.execution?.id&&e.state==='succeeded');
+      if(!execution||!policy.allowed_operations.includes(execution.intent.request.operation as 'audio'|'image'|'animation'|'avatar'))continue;
+      const assessor=this.bindings[execution.intent.request.operation as keyof PipelineBindings]?.assessor;
+      if(!assessor?.id.trim()||!assessor.version.trim())continue;
+      // Unknown outcomes require an operator decision. Recovery must not repeatedly rewrite a candidate.
+      if(initial.d.evaluations.some(e=>e.method==='operational_policy'&&e.policy&&sameRef(e.policy,policy)&&asset.evaluation_refs.some(r=>sameRef(r,e))))continue;
+      const step=stepSchema.parse(execution.intent.request.parameters['_fbr']);
+      const context:PipelineOperationContext={production:initial.p,dossier:initial.d,snapshot:initial.snapshot,operation:execution.intent.request.operation,
+        shot:execution.intent.request.shot,step,text:String(execution.intent.request.parameters['text']??execution.intent.request.parameters['prompt']??''),inputs:initial.d.assets.filter(a=>a.status==='approved'),attempt:execution.intent.request.attempt};
+      let assessment;
+      try{assessment=CandidateAssessmentSchema.parse(await assessor.evaluate({asset,execution,context,policy}));}catch{continue;}
+      const decision=assessmentDecision(assessment,policy.required_checks,asset.usage.permission==='allowed');
+      const fingerprint=sha256(canonical({asset,policy,assessment,assessor:{id:assessor.id,version:assessor.version}}));
+      await this.db.transaction(async client=>{
+        await this.ensureLease(client,id,token);const {p,d,snapshot}=await pipelineState(client,id,true);
+        const current=d.assets.find(a=>sameRef(a,asset)),currentPolicy=recurringExecutionPolicy(snapshot);
+        if(!['producing','correcting'].includes(p.status)||!current||current.status!=='candidate'||!currentPolicy||canonical(currentPolicy)!==canonical(policy))return;
+        if(!await this.files.exists(current)||!await belongsToExecution(client,id,current,execution))return;
+        const at=new Date().toISOString(),evaluation=EvaluationSchema.parse({id:`policy_${fingerprint}`,version:1,created_at:at,author:'operational_policy',
+          changes:[{at,author:'operational_policy',reason:`assessor:${assessor.id}:${assessor.version}`},
+            ...(decision==='rejected'&&assessment.retryable?[{at,author:'operational_policy',reason:'operational_retry_allowed'}]:[])],
+          target:{id:current.id,version:current.version+1},policy:{id:policy.id,version:policy.version},method:'operational_policy',status:decision,
+          criteria:[...assessment.criteria.map(c=>({...c,mandatory:c.mandatory||policy.required_checks.includes(c.name)})),
+            ...policy.required_checks.filter(name=>!assessment.criteria.some(c=>c.name===name)).map(name=>({name,mandatory:true,result:'needs_review',evidence:'O avaliador não forneceu a evidência exigida pela política.',timecode_seconds:null,corrective_action:'Revisar o arquivo ou corrigir o avaliador configurado.'})),
+            {name:'usage_permission',mandatory:true,result:current.usage.permission==='allowed'?'pass':'needs_review',evidence:current.usage.evidence??'Direitos de uso sem evidência.',timecode_seconds:null,corrective_action:current.usage.permission==='allowed'?null:'Confirmar direitos de uso antes da liberação.'}]}),
+          next=AssetSchema.parse({...current,version:current.version+1,created_at:at,status:decision==='needs_review'?'candidate':decision,
+            changes:[...current.changes,{at,author:'operational_policy',reason:`policy:${policy.id}:${policy.version}`}],evaluation_refs:[...current.evaluation_refs,{id:evaluation.id,version:1}]});
+        await new PostgresMediaStore(this.db,this.files).commitWithin(client,id,[{kind:'asset',record:next,expected_version:current.version},{kind:'evaluation',record:evaluation,expected_version:null}]);
+        await publish(client,p,{...d,assets:d.assets.map(a=>a.id===next.id?next:a),evaluations:[...d.evaluations,evaluation]}, {},decision==='approved'?'Mídia liberada por política operacional; revisão final humana preservada.':decision==='rejected'?'Mídia reprovada pela política operacional.':'Evidência operacional insuficiente; decisão humana necessária.');
+      });
+    }
+  }
+  private async retryRecoverable(id:string){
+    let {p,d,snapshot}=await pipelineState(this.db,id);const policy=recurringExecutionPolicy(snapshot);
+    if(!policy||!policy.max_auto_retries)return;
+    const jobs=await this.queue.list(id),latest=new Map<string,GenerationExecution>();
+    for(const job of jobs){const prior=latest.get(job.intent.request.execution_key);if(!prior||prior.intent.request.attempt<job.intent.request.attempt)latest.set(job.intent.request.execution_key,job);}
+    for(const job of latest.values()){
+      if(!policy.allowed_operations.includes(job.intent.request.operation as 'audio'|'image'|'animation'|'avatar')||job.intent.request.attempt>policy.max_auto_retries||job.intent.request.attempt>=(snapshot.profile.budget?.max_attempts_per_job??1))continue;
+      const rejected=d.assets.find(a=>a.status==='rejected'&&a.execution?.id===job.provider_job?.id&&d.evaluations.some(e=>e.method==='operational_policy'&&e.policy&&sameRef(e.policy,policy)&&a.evaluation_refs.some(r=>sameRef(r,e))&&e.changes.some(c=>c.reason==='operational_retry_allowed')));
+      const failed=job.state==='failed'&&job.provider_job?.error?.retryable===true;
+      if(!rejected&&!failed)continue;
+      // One stable command for each observed failure. The queue and current production are locked by retry().
+      try{await this.retry({command_id:`auto_retry_${job.id}`,production:{id:p.id,version:p.version},...(rejected?{asset:{id:rejected.id,version:rejected.version}}:{execution:{id:job.id,version:job.version}}),reason:`Alternativa automática limitada pela política ${policy.id} v${policy.version}.`});}
+      catch(error){if(!(error instanceof ApplicationError))throw error;}
+      ({p,d,snapshot}=await pipelineState(this.db,id));
+    }
+  }
+  async candidates(id:string){const {p,d,snapshot}=await pipelineState(this.db,id),policy=recurringExecutionPolicy(snapshot);return{production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version},reviews:d.assets.map(a=>({asset:{id:a.id,version:a.version},method:d.evaluations.find(e=>a.evaluation_refs.some(r=>sameRef(r,e))&&sameRef(e.target,a))?.method??null,reason:a.status==='candidate'?(policy?'Aguardando evidências da política operacional; se não forem suficientes, revise o arquivo.':'Calibração supervisionada: revise o arquivo e os direitos de uso.'):null})),items:d.assets.filter(a=>['audio','image','clip'].includes(a.type)&&a.status!=='outdated').map(a=>({...a,
+    preview_url:`/api/productions/${encodeURIComponent(id)}/candidates/${encodeURIComponent(a.id)}?version=${a.version}`}))};}
   async assemblyStatus(id:string){
     const{p}=await pipelineState(this.db,id),runs=(await this.db.query('SELECT a.state,a.diagnostic,a.production_version,e.record FROM assembly_runs a LEFT JOIN assembly_evidence e USING(command_id) WHERE a.production_id=$1 ORDER BY a.started_at DESC LIMIT 20',[id])).rows;
     return{production:{id:p.id,version:p.version},runs:runs.map(row=>{const evidence=row.record as {mix?:{status:string;integrated_lufs:number|null;true_peak_dbtp:number|null};quality_hash?:string}|null;
@@ -309,8 +367,13 @@ export class ProductionPipeline{
   async recover(){
     await new LocalAssemblyService(this.db,this.files).reconcileInterrupted();
     let cursor='',checked=0,pending=0;
-    for(;;){const rows=(await this.db.query("SELECT h.id FROM production_heads h JOIN production_revisions r USING(id,version) WHERE h.id>$1 AND r.record->>'status' IN ('producing','correcting') ORDER BY h.id LIMIT 100",[cursor])).rows;
-      if(!rows.length)break;for(const row of rows){cursor=String(row.id);checked++;try{await this.advance(cursor);}catch{pending++;}}if(rows.length<100)break;
+    for(;;){const rows=(await this.db.query("SELECT h.id FROM production_heads h JOIN production_revisions r USING(id,version) WHERE h.id>$1 AND r.record->>'status' IN ('awaiting_decision','producing','correcting') ORDER BY h.id LIMIT 100",[cursor])).rows;
+      if(!rows.length)break;for(const row of rows){cursor=String(row.id);checked++;try{
+        const {p,d}=await pipelineState(this.db,cursor);
+        if(p.status==='awaiting_decision'){
+          if(await this.review.canStartOperationalPlanning(cursor))await this.start({command_id:`policy_start_${sha256(`${p.id}:${p.version}:${d.version}`)}`,production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version}});
+        }else await this.advance(cursor);
+      }catch{pending++;}}if(rows.length<100)break;
     }return{checked,pending};
   }
 }

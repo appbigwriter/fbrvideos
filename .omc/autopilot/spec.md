@@ -1,7 +1,9 @@
-# Implementação autônoma da tasklist de 6/10/2026
+# Fechamento autônomo — 29/10/2026
 
-Escopo autorizado: TL-01–TL-18 de docs/tasklist-remanescente-2026-10-06.md. Preservar produções existentes, APIs/serviços e entregas verificadas. Desenvolver integrações configuráveis e ensaios locais sem gasto externo, sem fabricar aceitações humanas. EX-01–EX-04 continuam gates externos.
+Escopo atual: docs/tasklist-fechamento-2026-10-28.md. Estado e evidências: docs/arquitetura/entrega-fechamento-2026-10-29.md.
 
-Critério principal: jornada pública com mídia sintética identificada, desde seleção/artigo/perfil e planejamento até avaliação, montagem, correção e exportação. Journal, ownership, referências exatas, orçamento e recuperação devem continuar corretos após reinício. Adapters reais devem ser concretos/configuráveis/testados offline, fechados sem credenciais/evidência de acesso/custo.
+Entregues: política recorrente versionada e avaliação operacional sem aprovação humana fictícia; retries limitados; ativação explícita de perfil calibrado; mídia de referências; configurações e teto por período; backup13/migração16; pacote Docker/TLS e ferramentas de piloto/restore. FlowRouter permanece opcional futuro.
 
-Frentes: integração/orquestração/linhagem/API/UI (principal); formatos/render/alinhamento/streaming; adapters/callbacks/custos; calibração/retenção/operação. Migrações aditivas 011–013 e backup compatível. Revisão funcional, segurança e qualidade após integração.
+Preservar os gates externos: artigo/voz/referências autorizados, composição real das contas/IDs, teto/moeda/autorização específica de gasto, rubrica/corpus/aceite humano e destino/metas/políticas definitivos. Não fabricar resultados nem usar aprovação de fixture como evidência real. Não executar descarte nem migração em bancos reais automaticamente.
+
+Verificação: npm run verify 174 casos (172 aprovados, 2 nativos omitidos); rodada nativa separada 22 aprovados; jornada sintética em imagem Linux aprovada. Fonte de verdade para pendências e limitações é o registro de entrega, não planos antigos de 6/10.

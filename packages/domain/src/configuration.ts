@@ -11,6 +11,7 @@ export interface ConfigurationReader {
   get(kind: EntityKind, id: string, version?: number): Promise<ConfigurationRecord | null>;
   list(kind: EntityKind): Promise<ConfigurationRecord[]>;
   bible(hash: string): Promise<string | null>;
+  profileCalibration?(profile: Profile): Promise<boolean>;
 }
 export interface ConfigurationTransaction extends ConfigurationReader {
   append(kind: EntityKind, record: ConfigurationRecord, expected: number | null): Promise<void>;
@@ -86,8 +87,10 @@ export class ConfigurationService {
         record = CharacterSchema.parse({ ...base, ...data, bible: { original_uri: `/api/bibles/${hash}`, original_hash: hash, interpretation, interpretation_confirmed } });
       } else if (kind === 'references') {
         const data = SaveReferenceSchema.parse(raw).data;
-        if (data.asset_refs.length) throw new ApplicationError('ineligible', 'Upload e vinculação de mídia serão disponibilizados na integração de assets.');
-        record = ReferenceSchema.parse({ ...base, ...data });
+        const previous=old as Reference|null;
+        if(canonical(data.asset_refs)!==canonical(previous?.asset_refs??[]))throw new ApplicationError('ineligible','Arquivos devem ser vinculados pelo fluxo de upload de referências.');
+        if(data.kind==='voice'&&previous?.media_files?.some(file=>!file.mime_type.startsWith('audio/')))throw new ApplicationError('ineligible','Referência vocal exige arquivos de áudio.');
+        record = ReferenceSchema.parse({ ...base, ...data,...(previous?.media_files?{media_files:previous.media_files}:{}) });
       } else {
         const data = SaveProfileSchema.parse(raw).data;
         await this.require(tx, 'characters', data.character, true);

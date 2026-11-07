@@ -4,7 +4,7 @@ import { ProductionSchema, DossierSchema, AssetSchema, EvaluationSchema, Approva
   ExportDeliverySchema, ExportManifestSchema, ProposeCorrectionSchema, CancelCorrectionSchema, CorrectionSchema, RenderHistorySchema, EditSpeechSchema, SpeechEditViewSchema,ProductionSnapshotSchema,
   CorrectionExecutionPlanSchema,AuthorizeCorrectionSchema,ExecuteCorrectionSchema,PublishCorrectionAssetsSchema,GenerationExecutionSchema,ApprovePlanningSchema,type Correction,type AssetStore, type Production, type Dossier, type Asset,
   type ReviewPoint, type VersionRef, type ProductionEvent,type GenerationAdmission } from '@fbr/contracts';
-import { ApplicationError, canonical, sha256, sameRef, buildDeliveryManifest, correctionImpact, invalidateDossier,inspectDossier,budgetPreflight } from '@fbr/domain';
+import { ApplicationError, canonical, sha256, sameRef, buildDeliveryManifest, correctionImpact, invalidateDossier,inspectDossier,budgetPreflight,operationalPlanningEligible,recurringExecutionPolicy } from '@fbr/domain';
 import type { SqlClient, SqlDatabase } from './configuration-store.js';
 import { storeDeliveryManifest } from './delivery-store.js';
 import {PostgresMediaStore,type MediaWrite} from './media-store.js';
@@ -157,16 +157,39 @@ export class PostgresReviewWorkflow {
     }));
   }
   /** Chamada do runtime provisionado após conferir conexões; orçamento ainda é reservado pela fila. */
+  async canStartOperationalPlanning(id:string):Promise<boolean>{
+    const p=await production(this.db,id),d=await dossier(this.db,p);
+    return !!d&&p.status==='awaiting_decision'&&p.costs.committed_minor===0
+      &&!p.pending_issues.some(issue=>issue.required&&!['provider_setup_pending','audiovisual_gate_pending','planning_review_pending','editorial_review_required'].includes(issue.code))
+      &&!!await this.operationalPlanning(this.db,p,d);
+  }
+  private async operationalPlanning(client:SqlClient,p:Production,d:Dossier){
+    const snapshot=ProductionSnapshotSchema.parse((await client.query('SELECT record FROM production_snapshots WHERE production_id=$1',[p.id])).rows[0]?.record),{hash,...body}=snapshot;
+    if(hash!==sha256(canonical(body))||snapshot.production_id!==p.id||p.mode!=='recurring'||!operationalPlanningEligible(snapshot,d))return null;
+    return recurringExecutionPolicy(snapshot);
+  }
   async beginGeneration(raw:unknown){
     const request=ApprovePlanningSchema.omit({reviewed_sources:true,reviewed_direction:true}).parse(raw);
     return ProductionSchema.parse(await this.command(request.command_id,request,'begin_generation',async(client,p)=>{
       const d=await dossier(client,p);
-      if(!d||!sameRef(d,request.dossier)||p.status!=='awaiting_decision'||d.pending_issues.some(issue=>issue.required)
-        ||p.pending_issues.some(issue=>issue.required&&issue.code!=='provider_setup_pending')||p.costs.committed_minor!==0
-        ||!['editorial','direction'].every(kind=>d.approvals.some(approval=>approval.kind===kind&&approval.status==='active'&&sameRef(approval.target,d)
-          &&approval.evaluation_refs.every(ref=>d.evaluations.some(e=>sameRef(e,ref)&&sameRef(e.target,d)&&e.method==='human'&&e.status==='approved')))))
+      const policy=d?await this.operationalPlanning(client,p,d):null;
+      const ignored=policy?['provider_setup_pending','audiovisual_gate_pending','planning_review_pending','editorial_review_required']:['provider_setup_pending'];
+      if(!d||!sameRef(d,request.dossier)||p.status!=='awaiting_decision'||d.pending_issues.some(issue=>issue.required&&(!policy||issue.code!=='editorial_review_required'))
+        ||p.pending_issues.some(issue=>issue.required&&!ignored.includes(issue.code))||p.costs.committed_minor!==0
+        ||(!policy&&!['editorial','direction'].every(kind=>d.approvals.some(approval=>approval.kind===kind&&approval.status==='active'&&sameRef(approval.target,d)
+          &&approval.evaluation_refs.every(ref=>d.evaluations.some(e=>sameRef(e,ref)&&sameRef(e.target,d)&&e.method==='human'&&e.status==='approved'))))))
         throw new ApplicationError('ineligible','Geração exige planejamento aprovado exato e pendências resolvidas.');
-      return appendProduction(client,p,{status:'producing',stage:'generation',pending_issues:p.pending_issues.filter(issue=>issue.code!=='provider_setup_pending')},'generation_started','Pipeline ativado; cada operação exige admissão e reserva antes do envio.');
+      let target=p.dossier;
+      if(policy){
+        const at=new Date().toISOString(),evaluation=EvaluationSchema.parse({id:randomUUID(),version:1,created_at:at,author:'operational_policy',changes:[],status:'approved',
+          target:{id:d.id,version:d.version+1},method:'operational_policy',policy:{id:policy.id,version:policy.version},criteria:[
+            {name:'Escopo recorrente calibrado',mandatory:true,result:'pass',evidence:policy.evidence_refs.join('\n'),timecode_seconds:null,corrective_action:null},
+            {name:'Integridade de fontes e repertório',mandatory:true,result:'pass',evidence:'Snapshot íntegro, fontes/referências verificadas e plano dentro da política fixada. Liberação operacional; não representa revisão humana desta produção.',timecode_seconds:null,corrective_action:null}]});
+        const next=DossierSchema.parse({...d,version:d.version+1,created_at:at,status:'ready',pending_issues:d.pending_issues.filter(issue=>issue.code!=='editorial_review_required'),evaluations:[...d.evaluations,evaluation]});
+        await client.query('INSERT INTO production_dossiers(id,version,record) VALUES($1,$2,$3::jsonb)',[next.id,next.version,JSON.stringify(next)]);
+        await saveMedia(client,p.id,'evaluation',evaluation,null);target={id:next.id,version:next.version};
+      }
+      return appendProduction(client,p,{status:'producing',stage:'generation',dossier:target,pending_issues:p.pending_issues.filter(issue=>!ignored.includes(issue.code))},'generation_started',policy?'Pipeline liberado pela política operacional fixada; revisão final humana permanece obrigatória.':'Pipeline ativado; cada operação exige admissão e reserva antes do envio.');
     }));
   }
   async editSpeech(raw:unknown){

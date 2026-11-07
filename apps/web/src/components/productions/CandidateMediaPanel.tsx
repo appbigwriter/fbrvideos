@@ -3,8 +3,10 @@ import {z} from 'zod';
 import {AssetSchema,VersionRefSchema,ProductionSchema,type Asset,type VersionRef} from '@fbr/contracts';
 import {useResource,useCommand} from '../../api.js';
 import {ResourceState} from '../../pages/ConnectedShared.js';
-export const CandidateItemSchema=AssetSchema.safeExtend({preview_url:z.string().regex(/^\/api\//).nullable()});
-export const CandidateListSchema=z.strictObject({production:VersionRefSchema,dossier:VersionRefSchema,items:z.array(CandidateItemSchema)});
+export const CandidateItemSchema=AssetSchema.safeExtend({preview_url:z.string().regex(/^\/api\//).nullable(),
+ review_method:z.enum(['human','operational_policy','deterministic','model_signal']).nullable().optional(),review_reason:z.string().nullable().optional()});
+export const CandidateListSchema=z.strictObject({production:VersionRefSchema,dossier:VersionRefSchema,items:z.array(CandidateItemSchema),
+ reviews:z.array(z.object({asset:VersionRefSchema,method:z.enum(['human','operational_policy','deterministic','model_signal']).nullable(),reason:z.string().nullable()})).optional()});
 export function candidateEvaluation(production:VersionRef,asset:Asset,decision:'approved'|'rejected',reviewed:boolean,rights:boolean,reason:string){
  if(!reviewed)throw new Error('Revise o arquivo inteiro antes de decidir.');
  if(decision==='approved'&&!rights)throw new Error('Confirme os direitos de uso antes de aprovar.');
@@ -21,10 +23,10 @@ export function CandidateMediaPanel({productionId,onSaved}:{productionId:string;
  useEffect(()=>{const timer=setInterval(resource.refresh,5000);return()=>clearInterval(timer);},[resource.refresh]);
  const saved=()=>{resource.refresh();onSaved();};
  return <section aria-label="Mídia gerada"><h2>Mídia gerada</h2>
-  <p>Examine cada arquivo antes de liberar suas dependências. O ensaio sintético não representa aceite audiovisual do piloto.</p>
+  <p>Na calibração e nas exceções, examine os arquivos para liberar suas dependências. Na produção recorrente, a política do perfil pode liberar etapas com evidências. A revisão final humana permanece obrigatória.</p>
   <ResourceState {...resource} onRetry={resource.refresh}/>
   {resource.data?.items.length===0&&<p>Nenhum arquivo candidato disponível.</p>}
-  <div className="connected-cards">{resource.data?.items.map(asset=><CandidateCard key={`${asset.id}:${asset.version}`} asset={asset} production={resource.data!.production} onSaved={saved}/>)}</div>
+  <div className="connected-cards">{resource.data?.items.map(asset=>{const review=resource.data?.reviews?.find(r=>r.asset.id===asset.id&&r.asset.version===asset.version);return <CandidateCard key={`${asset.id}:${asset.version}`} asset={{...asset,review_method:review?.method,review_reason:review?.reason}} production={resource.data!.production} onSaved={saved}/>;})}</div>
  </section>;
 }
 export function CandidateCard({asset,production,onSaved}:{asset:z.infer<typeof CandidateItemSchema>;production:VersionRef;onSaved:()=>void}){
@@ -32,7 +34,10 @@ export function CandidateCard({asset,production,onSaved}:{asset:z.infer<typeof C
  const command=useCommand(),[retryReason,setRetryReason]=useState(''),[retrySaved,setRetrySaved]=useState(false);
  const submit=(decision:'approved'|'rejected')=>{try{const body=candidateEvaluation(production,asset,decision,reviewed,rights,reason);setValidation(null);void command.run(`/productions/${encodeURIComponent(production.id)}/candidates/evaluate`,z.unknown(),body,onSaved);}catch(error){setValidation(error instanceof Error?error.message:'Confira a decisão.');}};
  return <article><h3>{{audio:'Áudio',image:'Imagem',clip:'Clipe',render:'Vídeo',subtitle:'Legenda',manifest:'Manifesto'}[asset.type]} · v{asset.version}</h3>
-  <p>Estado: {{candidate:'Aguardando revisão',approved:'Aprovado',rejected:'Rejeitado',outdated:'Desatualizado'}[asset.status]}{asset.origin==='fixture'?' · Arquivo sintético':''}.</p>
+  <p>Estado: {asset.status==='approved'&&asset.review_method==='operational_policy'?'Liberado pela política operacional':{candidate:'Aguardando revisão',approved:'Aprovado',rejected:'Rejeitado',outdated:'Desatualizado'}[asset.status]}{asset.origin==='fixture'?' · Arquivo sintético':''}.</p>
+  {asset.review_method==='human'&&<p>Revisado por pessoa.</p>}
+  {asset.review_method==='operational_policy'&&<p>Avaliação automática registrada; não representa aprovação humana do vídeo final.</p>}
+  {asset.review_reason&&<p role="status">{asset.review_reason}</p>}
   {asset.preview_url&&(asset.type==='audio'?<audio controls preload="metadata" src={asset.preview_url}/>:asset.type==='image'?<img style={{maxWidth:'100%',height:'auto'}} src={asset.preview_url} alt="Imagem candidata da produção"/>:['clip','render'].includes(asset.type)?<video style={{maxWidth:'100%'}} controls preload="metadata" src={asset.preview_url}/>:<a href={asset.preview_url}>Examinar arquivo</a>)}
   {!asset.preview_url&&<p>Preview indisponível; confira a pendência antes de avaliar.</p>}
   {asset.file.duration_seconds!==null&&<p>Duração medida: {asset.file.duration_seconds.toFixed(2)} s.</p>}

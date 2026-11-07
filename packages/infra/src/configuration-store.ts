@@ -1,7 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import type { EntityKind } from '@fbr/contracts';
-import { ApplicationError, recordSchemas, type ConfigurationStore, type ConfigurationTransaction, type ConfigurationRecord } from '@fbr/domain';
+import { ApplicationError, recordSchemas, canonical, sha256, type ConfigurationStore, type ConfigurationTransaction, type ConfigurationRecord } from '@fbr/domain';
+import {ProfileSchema,type Profile} from '@fbr/contracts';
 
 export interface SqlClient { query(sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>; }
 export interface SqlDatabase extends SqlClient { transaction<T>(run: (client: SqlClient) => Promise<T>): Promise<T>; }
@@ -38,10 +39,22 @@ export async function migrateConfiguration(db: SqlDatabase): Promise<void> {
   const pipeline=await readFile(new URL('../migrations/013_pipeline.sql',import.meta.url),'utf8');
   const budget=await readFile(new URL('../migrations/014_budget.sql',import.meta.url),'utf8');
   const evidence=await readFile(new URL('../migrations/015_runtime_evidence.sql',import.meta.url),'utf8');
-  await db.transaction(async client => { await client.query('SELECT pg_advisory_xact_lock(6401201)'); await client.query(sql); await client.query(productions); await client.query(inference); await client.query(generation); await client.query(media); await client.query(review); await client.query(corrections); await client.query(assembly); await client.query(execution); await client.query(httpIntents);await client.query(operations);await client.query(providerEvents);await client.query(pipeline);await client.query(budget);await client.query(evidence); });
+  const installation=await readFile(new URL('../migrations/016_installation.sql',import.meta.url),'utf8');
+  await db.transaction(async client => { await client.query('SELECT pg_advisory_xact_lock(6401201)'); await client.query(sql); await client.query(productions); await client.query(inference); await client.query(generation); await client.query(media); await client.query(review); await client.query(corrections); await client.query(assembly); await client.query(execution); await client.query(httpIntents);await client.query(operations);await client.query(providerEvents);await client.query(pipeline);await client.query(budget);await client.query(evidence);await client.query(installation); });
 }
 export function configurationReader(client: SqlClient) {
   return {
+    async profileCalibration(profile:Profile):Promise<boolean>{
+      const proof=profile.calibration_validation;if(!proof||profile.status!=='validated'||proof.source_profile.id!==profile.id||proof.source_profile.version+1!==profile.version)return false;
+      const sourceRow=(await client.query("SELECT record FROM configuration_revisions WHERE kind='profiles' AND id=$1 AND version=$2",[proof.source_profile.id,proof.source_profile.version])).rows[0];
+      const decision=(await client.query('SELECT record FROM calibration_profile_decisions WHERE id=$1',[proof.decision_id])).rows[0]?.record as Record<string,unknown>|undefined;
+      if(!sourceRow||sha256(canonical(sourceRow.record))!==proof.source_hash||!decision||decision.outcome!=='validated'||decision.human_reviewed!==true||decision.report_hash!==proof.report_hash)return false;
+      const target=decision.profile as {id?:string;version?:number}|undefined;
+      if(target?.id!==proof.source_profile.id||target?.version!==proof.source_profile.version)return false;
+      const source=ProfileSchema.parse(sourceRow.record),{id,version,created_at,author,changes,status,calibration_scope,calibration_validation,...body}=profile;
+      const {id:sourceId,version:sourceVersion,created_at:sourceAt,author:sourceAuthor,changes:sourceChanges,status:sourceStatus,calibration_scope:sourceScope,calibration_validation:sourceProof,...sourceBody}=source;
+      return canonical(body)===canonical(sourceBody);
+    },
     async get(kind: EntityKind, id: string, version?: number): Promise<ConfigurationRecord | null> {
       const result = version === undefined
         ? await client.query('SELECT r.record FROM configuration_revisions r JOIN configuration_heads h USING(kind,id,version) WHERE r.kind=$1 AND r.id=$2', [kind,id])
@@ -63,6 +76,7 @@ export class PostgresConfigurationStore implements ConfigurationStore {
   get(kind: EntityKind, id: string, version?: number) { return configurationReader(this.db).get(kind,id,version); }
   list(kind: EntityKind) { return configurationReader(this.db).list(kind); }
   bible(hash: string) { return configurationReader(this.db).bible(hash); }
+  profileCalibration(profile:Profile){return configurationReader(this.db).profileCalibration(profile);}
   async command(commandId: string, fingerprint: string, run: (tx: ConfigurationTransaction) => Promise<ConfigurationRecord>): Promise<ConfigurationRecord> {
     return this.db.transaction(async client => {
       await client.query('INSERT INTO configuration_commands(command_id,fingerprint) VALUES ($1,$2) ON CONFLICT DO NOTHING', [commandId,fingerprint]);

@@ -12,6 +12,7 @@ import {buildApp} from '../../../apps/api/src/app.js';
 import {migrateConfiguration,LocalImmutableAssetStore,PostgresConfigurationStore,PostgresProductionStore,PostgresReviewWorkflow,PostgresGenerationQueue,createProviderRuntime,
   type SqlClient,type SqlDatabase} from '../src/index.js';
 import {PostgresDatabase} from '../src/configuration-store.js';
+import {ReferenceMediaService,InstallationService} from '../src/index.js';
 
 test('Jornada pública inicial, aprovação de candidatos, correção visual/fala, reinício e exportação sintética',async()=>{
   const engine=new PGlite(),root=await mkdtemp(join(tmpdir(),'fbr-pipeline-test-'));
@@ -86,7 +87,7 @@ test('Jornada pública inicial, aprovação de candidatos, correção visual/fal
     for(const file of delivery.files){const response=await app.inject({url:file.download_url,headers:{host:'localhost'}});assert.equal(response.statusCode,200);assert.ok(response.rawPayload.length);}
     state=await detail();assert.equal(state.events.length,state.production.version);
     if(process.env.FBR_BROWSER_FIXTURE==='1'){
-      await app.close();app=buildApp(configurations,{productions,planner,review,pipeline:runtime.pipeline!,generation:new PostgresGenerationQueue(db),prepareCorrection:id=>runtime.pipeline!.prepareCorrection(id),allowedOrigins:['http://127.0.0.1:4301']});
+      await app.close();app=buildApp(configurations,{installation:new InstallationService(db),referenceMedia:new ReferenceMediaService(db,files),providerDiagnostics:async()=>({configured:true,verified_connection:false,reason:'Ensaio sintético isolado; nenhum fornecedor real consultado.',operations:[]}),productions,planner,review,pipeline:runtime.pipeline!,generation:new PostgresGenerationQueue(db),prepareCorrection:id=>runtime.pipeline!.prepareCorrection(id),allowedOrigins:['http://127.0.0.1:4301']});
       const index=await readFile('apps/web/dist/index.html','utf8');
       app.get('/assets/:name',async(request,reply)=>{const name=(request.params as {name:string}).name;if(!/^index-[\w-]+\.(js|css)$/.test(name))return reply.code(404).send();return reply.type(name.endsWith('.css')?'text/css':'text/javascript').send(await readFile(`apps/web/dist/assets/${name}`));});
       app.get('/*',async(_request,reply)=>reply.type('text/html').send(index));

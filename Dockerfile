@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM node:24-bookworm-slim AS base
+FROM node:24-bookworm-slim AS dependencies
 
 WORKDIR /app
 
 # Instalar dependências necessárias para compilação caso nativas
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar arquivos de definição de dependências
@@ -21,19 +21,25 @@ COPY packages/pipeline/package.json ./packages/pipeline/
 # Instalar todas as dependências (incluindo devDependencies para tsx/typescript)
 RUN npm ci
 
-# Copiar o restante do código da aplicação
-COPY . .
+FROM dependencies AS build
+COPY apps ./apps
+COPY packages ./packages
+COPY tsconfig.json ./
+RUN npm run typecheck && npm run build:web
 
-# Criar diretórios de dados locais caso necessários
-RUN mkdir -p var/assets var/backup
+FROM nginx:stable-alpine AS web
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/apps/web/dist /usr/share/nginx/html
+EXPOSE 443
 
-# Variáveis de ambiente padrão
-ENV NODE_ENV=production \
-    API_HOST=0.0.0.0 \
-    API_PORT=3001 \
-    APP_TIMEZONE=America/Sao_Paulo
-
+FROM dependencies AS runtime
+ENV NODE_ENV=production API_HOST=0.0.0.0 API_PORT=3001 APP_TIMEZONE=America/Sao_Paulo
+COPY --chown=node:node apps ./apps
+COPY --chown=node:node packages ./packages
+COPY --chown=node:node tools ./tools
+COPY --chown=node:node tsconfig.json ./
+RUN mkdir -p /app/var/assets /backups /app/deploy/bindings \
+    && chown -R node:node /app/var /backups /app/deploy
+USER node
 EXPOSE 3001
-
-# Comando padrão (pode ser sobrescrito no Easypanel para worker ou web)
-CMD ["npm", "run", "dev:api"]
+CMD ["node", "--import", "tsx", "apps/api/src/server.ts"]

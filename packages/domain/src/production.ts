@@ -3,7 +3,7 @@ import { ProductionSchema, ProductionSnapshotSchema, ProductionDetailSchema, Pro
   PlanningCommandSchema, DossierSchema, type Production, type ProductionSnapshot, type ProductionEvent, type Dossier,
   type Article, type Profile, type Character, type Reference, type PipelineCatalog } from '@fbr/contracts';
 import { ApplicationError, canonical, sha256, type ConfigurationReader } from './configuration.js';
-import { productionEligibility, inspectDossier, sameRef } from './index.js';
+import { productionEligibility, inspectDossier, sameRef, operationalPlanningEligible } from './index.js';
 
 export interface ProductionReader {
   get(id: string, version?: number): Promise<Production|null>;
@@ -42,13 +42,16 @@ export class ProductionService {
       const article = await tx.configuration.get('articles',request.article.id,request.article.version) as Article|null;
       const profile = await tx.configuration.get('profiles',request.profile.id,request.profile.version) as Profile|null;
       if (!article || !profile) throw new ApplicationError('not_found','Artigo ou perfil na revisão selecionada não encontrado.');
+      const currentProfile=await tx.configuration.get('profiles',request.profile.id) as Profile|null;
+      if(currentProfile?.status==='suspended')throw new ApplicationError('ineligible','Perfil suspenso; revisões históricas não habilitam novas produções.');
       const eligibility = productionEligibility(article,profile,request.mode);
       if (!eligibility.allowed) throw new ApplicationError('ineligible',eligibility.blockers.map(i => i.message).join(' '));
       const recipe = this.catalog.recipes.find(r => r.id === profile.recipe);
       if (!recipe || recipe.state === 'experimental') throw new ApplicationError('ineligible','Receita desconhecida ou experimental sem calibração de ações.');
       if (recipe.sections.some(section => !section.shot_classes.some(cls => profile.permitted_shot_classes.includes(cls))))
         throw new ApplicationError('ineligible','Repertório do perfil não atende à receita escolhida.');
-      if (request.mode === 'recurring' && !this.catalog.calibrations.some(e => sameRef(e.profile,profile) && e.recipe===recipe.id && e.recipe_version===recipe.version))
+      const calibratedProfile=profile.calibration_validation&&await tx.configuration.profileCalibration?.(profile);
+      if (request.mode === 'recurring' && !calibratedProfile&&!this.catalog.calibrations.some(e => sameRef(e.profile,profile) && e.recipe===recipe.id && e.recipe_version===recipe.version))
         throw new ApplicationError('ineligible','Não há registro de calibração desta revisão/receita no servidor.');
       const character = await tx.configuration.get('characters',profile.character.id,profile.character.version) as Character|null;
       if (!character || character.status !== 'confirmed' || !character.bible.interpretation_confirmed) throw new ApplicationError('ineligible','Personagem/Bible não confirmados.');
@@ -123,9 +126,13 @@ export class ProductionService {
         || !['draft','specified'].includes(dossier.status) || dossier.shots.some(s => !['draft','specified'].includes(s.status))) throw new ApplicationError('ineligible','Planejamento não pode apresentar geração/aprovação/montagem fictícia.');
       const issues = inspectDossier(dossier,snapshot.article,snapshot.profile);
       if (issues.some(i => i.required)) throw new ApplicationError('ineligible',issues.map(i => i.message).join(' '));
-      await tx.saveDossier(dossier);
+      const operational=operationalPlanningEligible(snapshot,dossier);
+      const planned=operational?DossierSchema.parse({...dossier,pending_issues:dossier.pending_issues.filter(issue=>issue.code!=='editorial_review_required')}):dossier;
+      await tx.saveDossier(planned);
       return this.revise(tx,current,{status:'awaiting_decision',dossier:{id:dossier.id,version:dossier.version},pending_issues:[...dossier.pending_issues,
-        {code:'audiovisual_gate_pending',message:'Dossiê registrado; fidelidade editorial, piloto e geração ainda dependem de validação.',next_action:'Revisar o planejamento e concluir o gate audiovisual.',required:true}]},'planning_completed','Dossiê persistido; aguardando validação, sem geração automática.');
+        ...(operational?[{code:'provider_setup_pending',message:'Planejamento liberado pela política recorrente; aguardando admissão das rotas.',next_action:'Aguardar execução ou conferir configuração e orçamento do servidor.',required:true}]
+          :[{code:'audiovisual_gate_pending',message:'Dossiê registrado; fidelidade editorial, piloto e geração ainda dependem de validação.',next_action:'Revisar o planejamento e concluir o gate audiovisual.',required:true}])].filter(issue=>!operational||issue.code!=='editorial_review_required')},
+        'planning_completed',operational?'Dossiê persistido; liberação operacional condicionada à política fixada e à admissão do runtime.':'Dossiê persistido; aguardando validação, sem geração automática.');
     });
   }
   private async revise(tx: ProductionTransaction,current: Production,patch: Partial<Production>,type: ProductionEvent['type'],message: string) {

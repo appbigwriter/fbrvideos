@@ -1,7 +1,7 @@
 import { useState,useEffect } from 'react';
 import {z} from 'zod';
 import { Link,useNavigate,useParams,useSearchParams } from 'react-router';
-import { ProfilesSchema,ArticleSchema,ProductionSchema,ProductionDetailSchema,ProductionsListSchema,productionStateLabels,
+import { ProfilesSchema,ArticleSchema,ProductionSchema,ProductionDetailSchema,ProductionsListSchema,InstallationSettingsSchema,productionStateLabels,
   GenerationListSchema, type Profile, type Article,type ProductionDetail } from '@fbr/contracts';
 import { useResource,useCommand,api } from '../api.js';
 import { ProductionSetupPanel } from '../components/productions/ProductionSetupPanel.js';
@@ -29,22 +29,25 @@ export function CreationForm({article,profiles}:{article:Article;profiles:Profil
   const command=useCommand(),navigate=useNavigate();const [name,setName]=useState(''),[profile,setProfile]=useState('');
   const [mode,setMode]=useState<'calibration'|'recurring'>('calibration');
   const [targetSeconds,setTargetSeconds]=useState(''),[avoid,setAvoid]=useState('');
+  const [reviewScript,setReviewScript]=useState(false);
   const candidate=profiles.find(p=>refValue(p)===profile);
   const setup=productionSetup(article,candidate,name,mode,targetSeconds,avoid);
   return <form className="connected-form production-setup-integration" onSubmit={event=>{event.preventDefault();
-    if(setup.request) void command.run('/productions',ProductionSchema,setup.request,p=>navigate(`/producoes/${p.id}`));}}>
-    <p>A produção fixa as revisões selecionadas e inicia planejamento automático. Quando configurado por OAuth, utiliza a cota da conta. Ainda não gera mídia.</p>
+    if(setup.request) void command.run('/productions',ProductionSchema,reviewScript?{...setup.request,overrides:{...setup.request.overrides,review_script:true}}:setup.request,p=>navigate(`/producoes/${p.id}`));}}>
+    <p>A produção fixa as revisões selecionadas e inicia planejamento automático. Quando configurado por OAuth, utiliza a cota da conta. A recorrência com perfil calibrado e política habilitada pode iniciar mídia dentro dos limites configurados.</p>
     <ProductionSetupPanel summary={{data:setup.summary,loading:false,error:null,onRetry:()=>{}}} options={{
       name,profile_value:profile,profile_options:profiles.filter(p=>p.character.id===article.character?.id&&p.character.version===article.character.version).map(p=>({value:refValue(p),label:`${p.name} · v${p.version}`})),
       mode,target_seconds:targetSeconds,avoid,pending:command.pending,error:command.error,
       onNameChange:setName,onProfileChange:setProfile,onModeChange:setMode,onTargetSecondsChange:setTargetSeconds,onAvoidChange:setAvoid}}/>
     <p>Itens a evitar: uma orientação por linha. Duração em branco utiliza a configuração do perfil.</p>
+    <label><input type="checkbox" checked={reviewScript} disabled={command.pending} onChange={event=>setReviewScript(event.target.checked)}/> Quero revisar roteiro e direção antes de gerar mídia, inclusive no modo recorrente.</label>
     <FormActions pending={command.pending} can_submit={setup.summary.can_submit} submit_label="Criar produção e planejar" blocked_reason={setup.summary.blockers[0]?.message??null} onCancel={()=>navigate('/artigos')}/>
   </form>;
 }
 export function ProductionPage() {
   const {id}=useParams();const resource=useResource(id?`/productions/${id}`:null,ProductionDetailSchema),command=useCommand();
   const jobs=useResource(id?`/productions/${id}/jobs`:null,GenerationListSchema);
+  const settings=useResource('/settings',InstallationSettingsSchema),formatTime=(value:string)=>new Intl.DateTimeFormat('pt-BR',{timeZone:settings.data?.timezone??'America/Sao_Paulo',dateStyle:'short',timeStyle:'short'}).format(new Date(value));
   const refresh=()=>{resource.reload();jobs.reload();};
   const detail=resource.data;
   const active=!!detail&&['preparing','producing','correcting'].includes(detail.production.status);
@@ -73,24 +76,25 @@ export function ProductionPage() {
       </article>)}</div>
     </section>{detail&&<>
     <p>Fonte: {detail.snapshot.article.title} · v{detail.snapshot.article.version}; perfil: {detail.snapshot.profile.name} · v{detail.snapshot.profile.version}.</p>
-    <h2>Histórico</h2><ol>{detail.events.map(event=><li key={event.id}>v{event.production.version} · {event.message}</li>)}</ol>
+    <h2>Histórico</h2><ol>{detail.events.map(event=><li key={event.id}><time dateTime={event.at}>{formatTime(event.at)}</time> · v{event.production.version} · {event.message}</li>)}</ol>
     <p><Link to={`/producoes/${id}/revisao`}>Abrir revisão</Link> · <Link to={`/producoes/${id}/entrega`}>Ver entrega</Link></p>
-  </>}<section className="dossier-integration" aria-label="Dossiê de planejamento"><h2>Dossiê de planejamento</h2><DossierPanel data={dossier.data} loading={resource.loading} error={resource.error??dossier.error} onRetry={resource.reload}/></section>
+  </>}<details className="dossier-integration" open={detail?.production.mode!=='recurring'}><summary>Inspecionar dossiê de planejamento</summary><DossierPanel data={dossier.data} loading={resource.loading} error={resource.error??dossier.error} onRetry={resource.reload}/></details>
     {detail&&<PlanningConsent key={`${detail.production.id}:${detail.production.version}`} detail={detail} onSaved={refresh}/>}
     {detail&&<GenerationStart detail={detail} onSaved={refresh}/>}
     {detail&&<BudgetRevisionPanel production={detail.production} onSaved={refresh}/>}
     {id&&detail&&['assembly','review','delivery'].includes(detail.production.stage)&&<AssemblyReport productionId={id}/>}
     {id&&active&&<CandidateMediaPanel productionId={id} onSaved={()=>{resource.refresh();jobs.refresh();}}/>}</Page>;
 }
-const GenerationStatusSchema=z.object({configured:z.boolean(),reason:z.string().nullable()});
+const GenerationStatusSchema=z.object({configured:z.boolean(),operational_eligible:z.boolean().optional(),reason:z.string().nullable()});
 function GenerationStart({detail,onSaved}:{detail:ProductionDetail;onSaved:()=>void}){
   const command=useCommand(),p=detail.production,d=detail.dossier;
-  const eligible=!!d&&p.status==='awaiting_decision'&&d.approvals.some(a=>a.kind==='editorial'&&a.status==='active');
+  const eligible=!!d&&p.status==='awaiting_decision';
   const setup=useResource(eligible?`/productions/${p.id}/generation/status`:null,GenerationStatusSchema);
   if(!eligible||!d)return null;
   return <section aria-label="Iniciar geração"><h2>Gerar mídia</h2><p>O servidor confere conexões, estimativas e limite antes de cada envio. Ensaios sintéticos permanecem identificados.</p>
     <ResourceState {...setup} onRetry={setup.reload}/>{setup.data?.reason&&<p role="status">{setup.data.reason}</p>}
-    <button type="button" disabled={command.pending||!setup.data?.configured} onClick={()=>void command.run(`/productions/${p.id}/generation/start`,ProductionSchema,{production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version}},onSaved)}>Iniciar geração configurada</button>
+    {setup.data?.operational_eligible&&<p>Perfil elegível para avanço automático pela política operacional. A revisão final humana permanece obrigatória.</p>}
+    <button type="button" disabled={command.pending||!setup.data?.configured||(!setup.data.operational_eligible&&!d.approvals.some(a=>a.kind==='editorial'&&a.status==='active'))} onClick={()=>void command.run(`/productions/${p.id}/generation/start`,ProductionSchema,{production:{id:p.id,version:p.version},dossier:{id:d.id,version:d.version}},onSaved)}>Iniciar geração configurada</button>
     {command.error&&<p role="alert">{command.error}</p>}</section>;
 }
 const AssemblyReportSchema=z.object({runs:z.array(z.object({state:z.string(),diagnostic:z.string().nullable(),production_version:z.number(),mix:z.object({status:z.string(),integrated_lufs:z.number().nullable(),true_peak_dbtp:z.number().nullable()}).nullable()}))});
@@ -110,7 +114,8 @@ function PendingExecutionActions({production,execution,onSaved}:{production:Prod
 }
 function PlanningConsent({detail,onSaved}:{detail:ProductionDetail;onSaved:()=>void}){
   const [sources,setSources]=useState(false),[direction,setDirection]=useState(false),command=useCommand(),d=detail.dossier,p=detail.production;
-  if(!d||p.status!=='awaiting_decision'||d.assets.length||d.approvals.some(approval=>approval.kind==='editorial'&&approval.status==='active'))return null;
+  const setup=useResource(p.status==='awaiting_decision'?`/productions/${p.id}/generation/status`:null,GenerationStatusSchema);
+  if(!d||setup.data?.operational_eligible||p.status!=='awaiting_decision'||d.assets.length||d.approvals.some(approval=>approval.kind==='editorial'&&approval.status==='active'))return null;
   return <section aria-label="Aprovação do planejamento"><h2>Conferir roteiro e direção</h2>
     <label><input type="checkbox" checked={sources} disabled={command.pending} onChange={event=>setSources(event.target.checked)}/>Conferi a fidelidade de todas as falas às fontes indicadas.</label>
     <label><input type="checkbox" checked={direction} disabled={command.pending} onChange={event=>setDirection(event.target.checked)}/>Revisei a intenção, direção e referências de todas as cenas.</label>

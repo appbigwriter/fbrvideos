@@ -48,6 +48,9 @@ export const ReferenceSchema = z.strictObject({
   kind: z.enum(['character', 'environment', 'wardrobe', 'prop', 'style', 'voice', 'composition']),
   name: text, asset_refs: z.array(VersionRefSchema), rules: z.array(text),
   usage_permission: z.enum(['unknown', 'allowed', 'denied']),
+  media_files:z.array(z.strictObject({id:IdSchema,version:z.literal(1),storage_key:text,hash:HashSchema,bytes:z.int().positive().max(20_000_000),mime_type:text,
+    duration_seconds:z.number().positive().nullable(),width:z.int().positive().nullable(),height:z.int().positive().nullable()})).max(20).optional(),
+  media_review:z.strictObject({reviewer:text,reason:text,reviewed_at:TimestampSchema,reviewed_in_full:z.literal(true),rights_confirmed:z.literal(true)}).optional(),
 });
 export const CharacterSchema = z.strictObject({
   ...versioned, status: z.enum(['draft', 'confirmed', 'archived']), name: text,
@@ -67,18 +70,35 @@ export const BudgetPolicySchema = z.strictObject({
   currency: CurrencySchema, ceiling_minor: MoneySchema, safety_margin_minor: MoneySchema,
   max_attempts_per_job: z.int().positive(),
 }).refine(v => v.safety_margin_minor <= v.ceiling_minor, { message: 'Margem excede teto' });
+/** Opt-in versionado; ausência mantém o workflow humano das revisões antigas. */
+export const ExecutionPolicySchema = z.strictObject({
+  id: IdSchema, version: z.int().positive(), planning: z.literal('automatic'), candidate_review: z.literal('operational'),
+  allowed_operations: z.array(z.enum(['audio', 'image', 'animation', 'avatar'])).min(1).max(4),
+  allowed_shot_classes: z.array(ShotClassSchema).min(1), required_checks: z.array(text).min(1).max(100),
+  evidence_refs: z.array(text).min(1).max(100), max_auto_retries: z.int().min(0).max(10),
+}).superRefine((value,ctx)=>{
+  for(const field of ['allowed_operations','allowed_shot_classes','required_checks','evidence_refs'] as const)
+    if(new Set(value[field]).size!==value[field].length)ctx.addIssue({code:'custom',path:[field],message:'A política não admite valores duplicados.'});
+});
+export type ExecutionPolicy = z.infer<typeof ExecutionPolicySchema>;
 export const ProfileSchema = z.strictObject({
   ...versioned, status: z.enum(['draft', 'calibrating', 'validated', 'suspended']), name: text,
   character: VersionRefSchema, language: text, target_seconds: z.number().positive().nullable(),
   recipe: nullableText, permitted_shot_classes: z.array(ShotClassSchema), permitted_references: z.array(VersionRefSchema),
   voice: VersionRefSchema.nullable(), delivery: DeliveryProfileSchema.nullable(), budget: BudgetPolicySchema.nullable(),
   calibration_scope: z.strictObject({ article_classes: z.array(text), formats: z.array(text), evidence_refs: z.array(text) }).nullable(),
+  execution_policy: ExecutionPolicySchema.optional(),
+  calibration_validation: z.strictObject({decision_id:IdSchema,source_profile:VersionRefSchema,source_hash:HashSchema,report_hash:HashSchema}).optional(),
 }).superRefine((v, ctx) => {
   if (v.status === 'validated' && (!v.recipe || !v.voice || !v.delivery || !v.budget || !v.target_seconds
       || !v.permitted_shot_classes.length || !v.calibration_scope?.evidence_refs.length
       || !v.calibration_scope.article_classes.length || !v.calibration_scope.formats.length)) {
     ctx.addIssue({ code: 'custom', message: 'Perfil validado exige configuração e evidência do escopo' });
   }
+  if(v.execution_policy?.allowed_shot_classes.some(cls=>!v.permitted_shot_classes.includes(cls)))
+    ctx.addIssue({code:'custom',path:['execution_policy'],message:'Política exige classes pertencentes ao repertório do perfil.'});
+  if(v.status==='validated'&&v.execution_policy?.evidence_refs.some(ref=>!v.calibration_scope?.evidence_refs.includes(ref)))
+    ctx.addIssue({code:'custom',path:['execution_policy'],message:'Política recorrente exige evidências no escopo calibrado.'});
 });
 
 export const CostSummarySchema = z.strictObject({
@@ -157,7 +177,8 @@ export const JobSchema = z.strictObject({
 export const EvaluationStateSchema = z.enum(['approved', 'rejected', 'needs_review']);
 export const EvaluationSchema = z.strictObject({
   ...versioned, status: EvaluationStateSchema, target: VersionRefSchema,
-  method: z.enum(['deterministic', 'model_signal', 'human']),
+  method: z.enum(['deterministic', 'model_signal', 'human', 'operational_policy']),
+  policy: VersionRefSchema.optional(),
   criteria: z.array(z.strictObject({ name: text, mandatory: z.boolean(),
     result: z.enum(['pass', 'fail', 'needs_review', 'not_applicable']), evidence: text,
     timecode_seconds: z.number().nonnegative().nullable(), corrective_action: nullableText })).min(1),
@@ -166,6 +187,8 @@ export const EvaluationSchema = z.strictObject({
     ctx.addIssue({ code: 'custom', message: 'Falha obrigatória não pode receber aprovação' });
   }
   if (v.status === 'approved' && v.method === 'model_signal') ctx.addIssue({ code: 'custom', message: 'Sinal de modelo não é aprovação' });
+  if(v.method==='operational_policy'&&!v.policy)ctx.addIssue({code:'custom',message:'Liberação operacional exige referência da política.'});
+  if(v.method!=='operational_policy'&&v.policy)ctx.addIssue({code:'custom',message:'Referência da política pertence à avaliação operacional.'});
 });
 
 const timed = { start_seconds: z.number().nonnegative(), end_seconds: z.number().positive() };

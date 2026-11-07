@@ -3,6 +3,7 @@ export * from './configuration.js';
 export * from './production.js';
 export * from './dependencies.js';
 export * from './delivery.js';
+export * from './execution-policy.js';
 
 export const sameRef = (a: VersionRef, b: VersionRef): boolean => a.id === b.id && a.version === b.version;
 const issue = (code: string, message: string, next_action: string) => ({ code, message, next_action, required: true });

@@ -1,5 +1,5 @@
 import {z} from 'zod';
-import {IdSchema,VersionRefSchema,ProductionSchema,ApprovalSchema,GenerationExecutionSchema,DossierSchema} from '@fbr/contracts';
+import {IdSchema,VersionRefSchema,ProductionSchema,ApprovalSchema,GenerationExecutionSchema,DossierSchema,ProfileSchema} from '@fbr/contracts';
 import {CalibrationObservationSchema,calibrationReport,canonical,sha256} from '@fbr/domain';
 import type {SqlDatabase,SqlClient} from './configuration-store.js';
 
@@ -65,6 +65,45 @@ export class CalibrationService{
   await client.query('INSERT INTO calibration_profile_decisions(id,profile_id,profile_version,report_hash,record) VALUES($1,$2,$3,$4,$5::jsonb) ON CONFLICT(id) DO NOTHING',[decision.id,decision.profile.id,decision.profile.version,decision.report_hash,JSON.stringify(decision)]);
   const saved=(await client.query('SELECT record FROM calibration_profile_decisions WHERE id=$1',[decision.id])).rows[0]?.record;
   if(canonical(saved)!==canonical(decision))throw new Error('calibration_decision_conflict');return decision;
+  });
+ }
+ /** A separate explicit command promotes the exact tested revision; editing any field requires recalibration. */
+ async activate(raw:unknown){
+  const request=z.strictObject({command_id:IdSchema,decision_id:IdSchema,profile:VersionRefSchema,confirm_activation:z.literal(true)}).parse(raw);
+  const commandId=`calibration-activate:${request.command_id}`,fingerprint=sha256(canonical(request));
+  return this.db.transaction(async client=>{
+   await client.query('INSERT INTO configuration_commands(command_id,fingerprint) VALUES($1,$2) ON CONFLICT DO NOTHING',[commandId,fingerprint]);
+   const command=(await client.query('SELECT fingerprint,result FROM configuration_commands WHERE command_id=$1 FOR UPDATE',[commandId])).rows[0]!;
+   if(command.fingerprint!==fingerprint)throw new Error('calibration_activation_conflict');
+   if(command.result)return ProfileSchema.parse(command.result);
+   await client.query('LOCK TABLE calibration_observations IN SHARE MODE');
+   await client.query('LOCK TABLE calibration_profile_decisions IN SHARE MODE');
+   const decision=(await client.query('SELECT record FROM calibration_profile_decisions WHERE id=$1',[request.decision_id])).rows[0]?.record as {profile?:{id:string;version:number};outcome?:string;human_reviewed?:boolean;report_hash?:string;targets?:unknown;reviewer?:string}|undefined;
+   if(!decision||decision.outcome!=='validated'||!decision.human_reviewed||decision.profile?.id!==request.profile.id||decision.profile?.version!==request.profile.version)throw new Error('calibration_validated_decision_required');
+   const rejected=(await client.query("SELECT id FROM calibration_profile_decisions WHERE profile_id=$1 AND profile_version=$2 AND record->>'outcome'='rejected' LIMIT 1",[request.profile.id,request.profile.version])).rows[0];
+   if(rejected)throw new Error('calibration_rejected_revision');
+   const head=(await client.query("SELECT version FROM configuration_heads WHERE kind='profiles' AND id=$1 FOR UPDATE",[request.profile.id])).rows[0];
+   if(Number(head?.version)!==request.profile.version)throw new Error('calibration_profile_stale');
+   const original=(await client.query("SELECT record FROM configuration_revisions WHERE kind='profiles' AND id=$1 AND version=$2",[request.profile.id,request.profile.version])).rows[0]?.record;
+   const profile=ProfileSchema.parse(original);
+   if(profile.status!=='calibrating')throw new Error('calibration_profile_not_calibrating');
+   const report=await this.report(request.profile,decision.targets,client);
+   if(report.hash!==decision.report_hash||!report.real_report.targets_met)throw new Error('calibration_report_changed');
+   const real=report.evidence.filter(row=>row.sample_type==='real');
+   for(const articleClass of report.real_report.article_classes)for(const format of report.real_report.formats){
+    const samples=real.filter(row=>row.observation.article_class===articleClass&&row.observation.format===format);
+    if(!calibrationReport(samples.map(row=>row.observation),report.targets).targets_met)throw new Error('calibration_scope_targets_not_met');
+   }
+   const evidenceRefs=[...new Set(report.evidence.filter(row=>row.sample_type==='real').flatMap(row=>row.evidence))];
+   if(profile.execution_policy?.evidence_refs.some(ref=>!evidenceRefs.includes(ref)))throw new Error('calibration_policy_evidence_missing');
+   const at=new Date().toISOString(),activated=ProfileSchema.parse({...profile,version:profile.version+1,created_at:at,status:'validated',
+    author:'calibration_activation',changes:[...profile.changes,{at,author:'calibration_activation',reason:`Ativação explícita pela decisão humana ${request.decision_id}; conteúdo da revisão calibrada preservado.`}],
+    calibration_scope:{article_classes:report.real_report.article_classes,formats:report.real_report.formats,evidence_refs:[...evidenceRefs,`calibration_decision:${request.decision_id}`]},
+    calibration_validation:{decision_id:request.decision_id,source_profile:request.profile,source_hash:sha256(canonical(original)),report_hash:report.hash}});
+   await client.query("UPDATE configuration_heads SET version=$2 WHERE kind='profiles' AND id=$1",[profile.id,activated.version]);
+   await client.query("INSERT INTO configuration_revisions(kind,id,version,record) VALUES('profiles',$1,$2,$3::jsonb)",[profile.id,activated.version,JSON.stringify(activated)]);
+   await client.query('UPDATE configuration_commands SET result=$2::jsonb WHERE command_id=$1',[commandId,JSON.stringify(activated)]);
+   return activated;
   });
  }
 }

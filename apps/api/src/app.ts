@@ -17,7 +17,7 @@ const versionQuery = z.strictObject({ version: z.coerce.number().int().positive(
 const routeParams = z.strictObject({ id: IdSchema });
 const schemas = { articles: ArticleSchema, characters: CharacterSchema, references: ReferenceSchema, profiles: ProfileSchema };
 
-export function buildApp(service: ConfigurationService, options: { capture?: typeof captureArticle; allowedOrigins?: string[];allowedHosts?:string[];accessToken?:string;secureCookie?:boolean; productions?: ProductionService; planner?: AutomaticPlanner; generation?: GenerationQueue; review?: PostgresReviewWorkflow;operationalState?:()=>Promise<unknown>;prepareCorrection?:(id:string)=>Promise<void>;pipeline?:ProductionPipeline;calibration?:CalibrationService;readiness?:()=>Promise<unknown>;retentionPlan?:()=>Promise<unknown>;budget?:PostgresBudgetWorkflow;providerCallback?:import('@fbr/infra').ProviderRuntime['receiveCallback'];recordTelemetry?:(snapshot:ReturnType<OperationalTelemetry['snapshot']>)=>Promise<unknown>;operationalHistory?:()=>Promise<unknown> } = {}) {
+export function buildApp(service: ConfigurationService, options: { installation?:import('@fbr/infra').InstallationService;providerDiagnostics?:()=>Promise<unknown>;referenceMedia?:import('@fbr/infra').ReferenceMediaService; capture?: typeof captureArticle; allowedOrigins?: string[];allowedHosts?:string[];accessToken?:string;secureCookie?:boolean; productions?: ProductionService; planner?: AutomaticPlanner; generation?: GenerationQueue; review?: PostgresReviewWorkflow;operationalState?:()=>Promise<unknown>;prepareCorrection?:(id:string)=>Promise<void>;pipeline?:ProductionPipeline;calibration?:CalibrationService;readiness?:()=>Promise<unknown>;retentionPlan?:()=>Promise<unknown>;budget?:PostgresBudgetWorkflow;providerCallback?:import('@fbr/infra').ProviderRuntime['receiveCallback'];recordTelemetry?:(snapshot:ReturnType<OperationalTelemetry['snapshot']>)=>Promise<unknown>;operationalHistory?:()=>Promise<unknown> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
   const allowedOrigins = options.allowedOrigins ?? ['http://127.0.0.1:5173','http://localhost:5173'];
   const telemetry=new OperationalTelemetry();
@@ -61,7 +61,19 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
   });
   app.get('/health', async () => ({ status: 'ok', contract_version: CONTRACT_VERSION }));
   if(options.readiness)app.get('/api/readiness',async()=>options.readiness!());
-  app.get('/api/productions/:id/generation/status',async request=>{const{id}=routeParams.parse(request.params);if(options.productions)await options.productions.detail(id);return{configured:!!options.pipeline,reason:options.pipeline?null:'Conexões de geração não configuradas nesta instalação.'};});
+  if(options.installation){const installation=options.installation;
+    app.get('/api/settings',async()=>installation.get());app.post('/api/settings',async request=>installation.save(request.body));
+    app.get('/api/consumption',async()=>installation.consumption());
+  }
+  if(options.providerDiagnostics)app.get('/api/providers/diagnostics',async()=>options.providerDiagnostics!());
+  if(options.referenceMedia){const media=options.referenceMedia;
+    const ownReference=(id:string,body:unknown)=>{const parsed=z.object({reference:routeParams.passthrough()}).passthrough().parse(body);if(parsed.reference.id!==id)throw new ApplicationError('validation','Comando aponta para outra referência.');return body;};
+    app.post('/api/references/:id/media',{bodyLimit:27_000_000},async request=>media.upload(ownReference(routeParams.parse(request.params).id,request.body)));
+    app.post('/api/references/:id/approve-media',async request=>media.approve(ownReference(routeParams.parse(request.params).id,request.body)));
+    app.get('/api/references/:id/media/:fileId',async(request,reply)=>{const{id,fileId}=z.strictObject({id:IdSchema,fileId:IdSchema}).parse(request.params),{version}=z.strictObject({version:z.coerce.number().int().positive()}).parse(request.query);
+      const file=await media.file(id,version,fileId);return reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff').type(file.mime_type).send(Buffer.from(file.bytes));});
+  }
+  app.get('/api/productions/:id/generation/status',async request=>{const{id}=routeParams.parse(request.params);if(options.productions)await options.productions.detail(id);return{configured:!!options.pipeline,operational_eligible:!!options.review&&await options.review.canStartOperationalPlanning(id),reason:options.pipeline?null:'Conexões de geração não configuradas nesta instalação.'};});
   if(!options.pipeline)app.post('/api/productions/:id/generation/start',async()=>{throw new ApplicationError('ineligible','Conexões de geração não configuradas. Conferir a configuração da instalação antes de iniciar mídia.');});
   if(options.providerCallback)app.post('/api/provider-callbacks/:adapterId',async(request,reply)=>{const{adapterId}=z.strictObject({adapterId:IdSchema}).parse(request.params);try{return await options.providerCallback!(adapterId,request.body,request.headers);}catch{return reply.code(401).send({message:'Callback não autenticado ou incompatível.'});}});
   if(options.budget)app.post('/api/productions/:id/budget',async request=>{const{id}=routeParams.parse(request.params);const body=z.object({production:routeParams.passthrough()}).passthrough().parse(request.body);if(body.production.id!==id)throw new ApplicationError('validation','Orçamento aponta para outra produção.');return options.budget!.revise(request.body);});
@@ -72,6 +84,7 @@ export function buildApp(service: ConfigurationService, options: { capture?: typ
       return evidenceAction(()=>calibration.report({id:query.profile_id,version:query.profile_version},{minimum_samples:query.minimum_samples,approval_rate:query.approval_rate}));});
     app.post('/api/calibration/observations',async request=>evidenceAction(()=>calibration.append(request.body)));
     app.post('/api/calibration/decisions',async request=>evidenceAction(()=>calibration.decide(request.body)));
+    app.post('/api/calibration/activations',async request=>evidenceAction(()=>calibration.activate(request.body)));
   }
   if(options.pipeline){const pipeline=options.pipeline;
     const pipelineCommand=(id:string,raw:unknown)=>{const parsed=z.object({production:z.object({id:IdSchema})}).passthrough().parse(raw);if(parsed.production.id!==id)throw new ApplicationError('validation','Comando aponta para outra produção.');return raw;};

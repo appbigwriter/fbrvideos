@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {AssetSchema,type AssetStore,type Asset} from '@fbr/contracts';
+import {AssetSchema,ReferenceSchema,type AssetStore,type Asset} from '@fbr/contracts';
 import {canonical,sha256} from '@fbr/domain';
 import {captureMetadataBackup,restoreMetadataBackup,MetadataBackupSchema,type MetadataBackup} from './metadata-backup.js';
 import type {SqlDatabase} from './configuration-store.js';
@@ -7,6 +7,9 @@ import { supportsAssetStreaming } from './streaming-asset-store.js';
 const BUFFERED_BACKUP_LIMIT = 100_000_000;
 function referencedFiles(backup:MetadataBackup){
   const records=new Map<string,{storage_key:string;hash:string;bytes:number|null;asset:Asset|null}>();
+  for(const row of backup.tables.configuration_revisions??[]){if(row.kind!=='references')continue;
+    for(const file of ReferenceSchema.parse(row.record).media_files??[]){const old=records.get(file.storage_key);if(old&&(old.hash!==file.hash||old.bytes!==file.bytes))throw new Error('backup_storage_conflict');records.set(file.storage_key,{...file,asset:null});}
+  }
   for(const row of backup.tables.media_revisions??[]){if(row.kind!=='asset')continue;
     const asset=AssetSchema.parse(row.record),old=records.get(asset.file.storage_key);
     if(old&&(old.hash!==asset.file.hash||old.bytes!==asset.file.bytes))throw new Error('backup_storage_conflict');

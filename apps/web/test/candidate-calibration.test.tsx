@@ -6,6 +6,12 @@ import {audioFixture,imageFixture,productionFixture} from '@fbr/contracts/fixtur
 import {CandidateCard,CandidateItemSchema,candidateEvaluation,candidateRetry} from '../src/components/productions/CandidateMediaPanel.js';
 import {BudgetRevisionPanel,budgetRevision,decimalToMinor,minorLabel} from '../src/components/productions/BudgetRevisionPanel.js';
 import {calibrationObservation} from '../src/components/operations/CalibrationPanel.js';
+
+test('Liberação operacional é identificada sem representar revisão humana do vídeo',()=>{
+ const asset=CandidateItemSchema.parse({...imageFixture,status:'approved',review_method:'operational_policy',preview_url:'/api/productions/test/candidates/image'});
+ const html=renderToStaticMarkup(<CandidateCard asset={asset} production={{id:productionFixture.id,version:productionFixture.version}} onSaved={()=>{}}/>);
+ assert.match(html,/Liberado pela política operacional/);assert.match(html,/não representa aprovação humana/);assert.doesNotMatch(html,/Revisado por pessoa|Examinei o arquivo inteiro/);
+});
 test('Avaliação candidata exige revisão completa, direitos e mantém revisão/hash exatos',()=>{
  const production={id:productionFixture.id,version:productionFixture.version};
  assert.throws(()=>candidateEvaluation(production,audioFixture,'approved',false,true,'Conferido'),/inteiro/);

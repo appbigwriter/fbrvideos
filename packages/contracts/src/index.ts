@@ -11,3 +11,4 @@ export * from './generation-queue.js';
 export * from './review-ui.js';
 export * from './correction-execution.js';
 export * from './operations.js';
+export * from './installation.js';

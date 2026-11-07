@@ -14,9 +14,9 @@ export const CharacterInputSchema = z.strictObject({
   interpretation_confirmed: z.boolean(), references: z.array(VersionRefSchema).max(100),
   voice: VersionRefSchema.nullable(), authorized_variations: z.array(text.max(2000)).max(100),
 }).refine(v => v.status !== 'confirmed' || v.interpretation_confirmed, { message: 'Confirmar a interpretação antes de confirmar a personagem' });
-export const ReferenceInputSchema = ReferenceSchema.omit({ id: true, version: true, created_at: true, author: true, changes: true })
+export const ReferenceInputSchema = ReferenceSchema.omit({ id: true, version: true, created_at: true, author: true, changes: true,media_files:true,media_review:true })
   .extend({ status: z.enum(['pending', 'archived']), asset_refs: z.array(VersionRefSchema).max(100) });
-export const ProfileInputSchema = z.strictObject(ProfileSchema.shape).omit({ id: true, version: true, created_at: true, author: true, changes: true })
+export const ProfileInputSchema = z.strictObject(ProfileSchema.shape).omit({ id: true, version: true, created_at: true, author: true, changes: true, calibration_validation:true })
   .extend({ status: z.enum(['draft', 'calibrating', 'suspended']) });
 const command = { command_id: IdSchema, expected_version: z.int().positive().nullable(), reason: text.max(2000) };
 export const SaveArticleSchema = z.strictObject({ ...command, data: ArticleInputSchema });

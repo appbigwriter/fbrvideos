@@ -8,3 +8,10 @@ var/
 coverage
 dist
 *.log
+apps/web/dist
+projetosbase
+.omc
+.kilo
+deploy/certs
+deploy/*.env
+!deploy/production.env.example

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
-import { ArticleListSchema, ArticleFilterOptionsSchema, ArticleSchema, CharacterSchema, UniverseSchema, type Article, type ArticleFilters } from '@fbr/contracts';
+import { ArticleListSchema, ArticleFilterOptionsSchema, ArticleSchema, CharacterSchema, UniverseSchema,ProductionsListSchema, type Article, type ArticleFilters } from '@fbr/contracts';
 import { ArticlesPanel } from '../components/articles/ArticlesPanel.js';
 import { TextField, TextareaField, SelectField, CheckboxField } from '../components/forms/ConfigurationFields.js';
 import { FormActions } from '../components/forms/FormActions.js';
@@ -24,12 +24,15 @@ export function ArticlePage() {
   const {id}=useParams(),[query]=useSearchParams();const navigate=useNavigate();
   const article=useResource(id?`/articles/${id}${query.has('version')?`?version=${encodeURIComponent(query.get('version')!)}`:''}`:null,ArticleSchema);
   const refresh=useCommand();
+  const productions=useResource('/productions',ProductionsListSchema);
   return <Page title="Detalhe do artigo"><ResourceState {...article} onRetry={article.reload}/>{article.data && <>
     <p>Revisão v{article.data.version} · {article.data.source.kind==='url'?'Importado por URL':'Importado manualmente'}</p>
     <Link to={`/artigos/${id}`}>Abrir revisão atual</Link>
     {article.data.source.url && <><p><a href={article.data.source.url} target="_blank" rel="noreferrer">Fonte original</a></p><button disabled={refresh.pending} onClick={()=>void refresh.run(`/articles/${id}/refresh`,ArticleSchema,{expected_version:article.data!.version},a=>navigate(`/artigos/${a.id}?version=${a.version}`))}>Recapturar fonte</button>{refresh.error&&<p role="alert">{refresh.error}</p>}</>}
     <ArticleEditor key={`${article.data.id}:${article.data.version}`} article={article.data} onCancel={()=>navigate('/artigos')} onSaved={a=>{navigate(`/artigos/${a.id}?version=${a.version}`);article.reload();}}/>
     <Link className="action-link" to={`/producoes/nova?artigo=${id}&version=${article.data.version}`}>Criar produção com esta revisão</Link>
+    <h2>Imagens identificadas na fonte</h2>{article.data.source_images.length===0?<p>Nenhuma imagem identificada.</p>:article.data.source_images.map((image,index)=><p key={index}><a href={/^https?:\/\//i.test(image.uri)?image.uri:undefined} target="_blank" rel="noreferrer">Imagem {index+1} na fonte</a> · uso {image.usage_permission==='allowed'?'permitido':image.usage_permission==='denied'?'negado':'não confirmado'}{image.evidence?` · ${image.evidence}`:''}</p>)}
+    <h2>Produções vinculadas ao artigo</h2><ResourceState {...productions} onRetry={productions.reload}/>{productions.data?.items.filter(p=>p.article.id===id).map(p=><p key={p.id}><Link to={`/producoes/${p.id}`}>{p.name}</Link> · fonte v{p.article.version} · produção v{p.version}</p>)}
   </>}</Page>;
 }
 function ArticleEditor({article,onSaved,onCancel}:{article:Article|null;onSaved:(article:Article)=>void;onCancel:()=>void}) {

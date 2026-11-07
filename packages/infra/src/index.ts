@@ -35,3 +35,6 @@ export * from './runtime-composition.js';
 export * from './source-reaudit.js';
 export * from './real-pipeline-bindings.js';
 export * from './budget-workflow.js';
+export * from './candidate-assessment.js';
+export * from './reference-media.js';
+export * from './installation-settings.js';

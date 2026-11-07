@@ -13,9 +13,11 @@ import {ProviderMediaTransfer,type MediaTransferTransport} from './provider-medi
 import {probeLocalMedia} from './media-probe.js';
 import {ProviderQuoteSchema,validateProviderQuote,type ProviderQuote} from './provider-estimates.js';
 import {belongsToExecution} from './asset-provenance.js';
+import type {CandidateAssessor} from './candidate-assessment.js';
 
 type Operation='audio'|'image'|'animation'|'avatar';
 export interface RealPipelineOperationConfig {
+  assessor?:CandidateAssessor;
   vendor:'higgsfield'|'heygen';adapter_id:string;model:ModelOperation;account_scope:string;enabled:boolean;
   key():string;evidence_refs:string[];
   /** Explicit server-side account/spending gate, never inferred from fixtures. */
@@ -96,7 +98,7 @@ export async function createRealPipelineBindings(config:RealPipelineConfig,conte
     const adapter=route.vendor==='higgsfield'?createHiggsfieldAdapter(normalizedConfig,new HiggsfieldClient(route.key,config.network),route.outputUrls!)
       :createHeygenAdapter(normalizedConfig,new HeygenClient(route.key,config.network));
     const parameters=async(ctx:PipelineOperationContext)=>route.parameters(ctx);
-    bindings[operation]={adapter,outputs:adapter,parameters,
+    bindings[operation]={adapter,outputs:adapter,parameters,...(route.assessor?{assessor:route.assessor}:{}),
       async estimate(ctx){
         if(!await route.authorize(ctx.production))throw new Error('real_pipeline_spending_not_authorized');
         const publicParameters=await parameters(ctx),allParameters=z.record(z.string(),z.json()).parse({...publicParameters,_fbr:ctx.step});

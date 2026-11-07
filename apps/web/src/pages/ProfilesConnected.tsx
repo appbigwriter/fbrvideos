@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ProfileSchema, ProfilesSchema, UniverseSchema, PipelineCatalogSchema, configurationStatusLabels,
+import { ProfileSchema, ProfilesSchema, UniverseSchema, PipelineCatalogSchema, ExecutionPolicySchema, configurationStatusLabels,
   type Profile, type Universe, type PipelineCatalog } from '@fbr/contracts';
 import { TextField,NumberField,SelectField,CheckboxField } from '../components/forms/ConfigurationFields.js';
 import { FormActions } from '../components/forms/FormActions.js';
@@ -32,7 +32,7 @@ function ProfileEditor({profile,universe,catalog,onCancel,onSaved}:{profile:Prof
     [width,setWidth]=useState(String(profile?.delivery?.width??'')),[height,setHeight]=useState(String(profile?.delivery?.height??'')),[fps,setFps]=useState(String(profile?.delivery?.fps??'')),
     [currency,setCurrency]=useState(profile?.budget?.currency??'BRL'),[ceiling,setCeiling]=useState(profile?.budget?String(profile.budget.ceiling_minor/100):''),
     [margin,setMargin]=useState(profile?.budget?String(profile.budget.safety_margin_minor/100):''),[attempts,setAttempts]=useState(String(profile?.budget?.max_attempts_per_job??''));
-  const [formError,setFormError]=useState<string|null>(null);
+  const [formError,setFormError]=useState<string|null>(null),[policyText,setPolicyText]=useState(profile?.execution_policy?JSON.stringify(profile.execution_policy,null,2):'');
   return <form className="connected-form" onSubmit={event=>{
     event.preventDefault();setFormError(null);
     const deliveryFilled=[width,height,fps].some(v=>v.trim()),budgetFilled=[ceiling,margin,attempts].some(v=>v.trim());
@@ -40,10 +40,11 @@ function ProfileEditor({profile,universe,catalog,onCancel,onSaved}:{profile:Prof
     if(budgetFilled&&![ceiling,margin,attempts].every(v=>v.trim())){setFormError('Preencha teto, margem e tentativas ou deixe o orçamento vazio.');return;}
     if(budgetFilled&&(!Number.isSafeInteger(money(ceiling))||!Number.isSafeInteger(money(margin)))){setFormError('Use valores monetários positivos ou zero, com até duas casas decimais.');return;}
     const chosen=parseRef(character);if(!chosen){setFormError('Selecione uma versão confirmada de personagem.');return;}
+    let executionPolicy;try{executionPolicy=policyText.trim()?ExecutionPolicySchema.parse(JSON.parse(policyText)):undefined;}catch{setFormError('A política de recorrência deve conter um objeto válido com escopo, verificações e evidências.');return;}
     void command.run(profile?`/profiles/${profile.id}/revisions`:'/profiles',ProfileSchema,{expected_version:profile?.version??null,reason:'Configuração do perfil de produção.',data:{
       name,status,character:chosen,language,target_seconds:numeric(duration),recipe:recipe||null,voice:parseRef(voice),permitted_shot_classes:classes,permitted_references:references,
       delivery:deliveryFilled?{width:Number(width),height:Number(height),fps:Number(fps),video_codec:profile?.delivery?.video_codec??'h264',audio_codec:profile?.delivery?.audio_codec??'aac',audio_sample_rate:profile?.delivery?.audio_sample_rate??48000,subtitle_format:profile?.delivery?.subtitle_format??'srt'}:null,
-      budget:budgetFilled?{currency,ceiling_minor:money(ceiling),safety_margin_minor:money(margin),max_attempts_per_job:Number(attempts)}:null,calibration_scope:profile?.calibration_scope??null}},onSaved);
+      budget:budgetFilled?{currency,ceiling_minor:money(ceiling),safety_margin_minor:money(margin),max_attempts_per_job:Number(attempts)}:null,calibration_scope:profile?.calibration_scope??null,...(executionPolicy?{execution_policy:executionPolicy}:{})}},onSaved);
   }}><h2>{profile?'Revisar perfil':'Novo perfil'}</h2><p>Receitas e formatos são candidatos. Salvar não valida o perfil nem inicia geração.</p>
     <TextField {...field('profile-name','Nome',command.pending)} required value={name} onChange={setName}/>
     <SelectField {...field('profile-status','Situação',command.pending)} value={status} onChange={v=>setStatus(v as Profile['status'])} placeholder="Selecionar" options={[{value:'draft',label:'Rascunho'},{value:'calibrating',label:'Em calibração'},{value:'suspended',label:'Suspenso'}]}/>
@@ -62,6 +63,7 @@ function ProfileEditor({profile,universe,catalog,onCancel,onSaved}:{profile:Prof
       <TextField {...field('profile-ceiling',`Teto em ${currency}`,command.pending,'Valor na moeda indicada, por exemplo 50,00.')} value={ceiling} onChange={setCeiling}/>
       <TextField {...field('profile-margin',`Margem de segurança em ${currency}`,command.pending)} value={margin} onChange={setMargin}/>
       <NumberField {...field('profile-attempts','Máximo de tentativas por job',command.pending)} value={attempts} onChange={setAttempts}/></fieldset>
+    <details><summary>Política avançada de recorrência</summary><p>Opcional. A política só é habilitada após calibração real desta revisão. Sem política, as revisões intermediárias continuam supervisionadas.</p><label>Política versionada<textarea rows={10} value={policyText} disabled={command.pending} onChange={event=>setPolicyText(event.target.value)}/></label></details>
     {(formError||command.error)&&<p role="alert">{formError??command.error}</p>}
     <FormActions pending={command.pending} can_submit={!!(name.trim()&&character&&language.trim())&&status!=='validated'&&!pinned.loading&&!pinned.error} submit_label="Salvar perfil" blocked_reason={status==='validated'?'Validação exige evidência e workflow de calibração.':pinned.error} onCancel={onCancel}/>
   </form>;

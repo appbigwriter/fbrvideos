@@ -12,6 +12,7 @@ import { ConfigurationService, ProductionService, sha256 } from '@fbr/domain';
 import { GenerationWorker, SimulatedGenerationAdapter, getPipelineCatalog } from '@fbr/pipeline';
 import {PostgresBudgetWorkflow} from '../src/budget-workflow.js';
 import {reconcileSettledInvoices} from '../src/provider-callback-inbox.js';
+import {InstallationService} from '../src/installation-settings.js';
 import {createHeygenAdapter,PostgresProviderReceiptStore} from '../src/normalized-provider-adapters.js';
 import {PostgresHttpTransmissionJournal} from '../src/http-generation-adapter.js';
 import {HeygenClient} from '../src/heygen-client.js';
@@ -350,4 +351,23 @@ test('Backup restaura snapshots e intenções sem sobrescrever destino; adultera
     await assert.rejects(restoreMetadataBackup(target, backup), /requires_empty/);
     assert.deepEqual(await restored.detail(p.id), await productions.detail(p.id));
   } finally { await engine.close(); }
+});
+
+test('Teto da instalação serializa reservas entre produções e revalida redução antes do envio',async()=>{
+ const installation=new InstallationService(db),original=await installation.get(),at=Date.now();
+ const save=async(ceiling:number|null)=>{const current=await installation.get();return installation.save({command_id:randomUUID(),expected_version:current.version,reason:'Ensaio do teto global.',data:{ui_language:'pt-BR',timezone:'America/Sao_Paulo',blogs:[],period_budget:ceiling===null?null:{currency:'BRL',ceiling_minor:ceiling,starts_at:new Date(at-60000).toISOString(),ends_at:new Date(at+3600000).toISOString()}}});};
+ try{
+  await save(150);
+  const p1=await source(),p2=await source(),requests=await Promise.all([intent(p1.id,100),intent(p2.id,100)]);
+  // Other tests in this file leave historical jobs. Attribute these older terminal samples outside this isolated period.
+  const prior=await installation.consumption();
+  await save(prior.totals.filter(t=>t.currency==='BRL').reduce((sum,t)=>sum+t.reserved_minor+t.confirmed_minor,150));
+  const results=await Promise.allSettled(requests.map(request=>queue.enqueue(request)));
+  assert.equal(results.filter(result=>result.status==='fulfilled').length,1);
+  assert.equal(results.filter(result=>result.status==='rejected').length,1);
+  const admitted=results.find(result=>result.status==='fulfilled');assert.ok(admitted&&admitted.status==='fulfilled');
+  await save(0);await assert.rejects(queue.claim(admitted.value.id),/teto|período|evidências/i);
+  assert.equal((await queue.get(admitted.value.id))!.state,'prepared');
+  const current=await installation.get();await assert.rejects(installation.save({command_id:randomUUID(),expected_version:current.version-1,reason:'Stale',data:{...current,version:undefined}}));
+ }finally{const current=await installation.get(),{version,...data}=original;await installation.save({command_id:randomUUID(),expected_version:current.version,reason:'Restaurar configuração do ensaio.',data});}
 });

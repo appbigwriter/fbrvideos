@@ -3,6 +3,7 @@ import { GenerationIntentSchema, GenerationExecutionSchema, ProductionSchema, Pr
   JobSchema, type GenerationExecution, type GenerationQueue, type Production,type GenerationAdmission,type Job } from '@fbr/contracts';
 import { ApplicationError, budgetPreflight, canonical, sha256 } from '@fbr/domain';
 import type { SqlClient, SqlDatabase } from './configuration-store.js';
+import {assertInstallationBudget} from './installation-settings.js';
 
 const terminal = (state:string) => ['succeeded', 'failed', 'cancelled'].includes(state);
 async function executions(client: SqlClient, productionId: string) {
@@ -99,9 +100,11 @@ export class PostgresGenerationQueue implements GenerationQueue {
         throw new ApplicationError('budget_exceeded', 'Reserva excede o orçamento com margem de segurança.');
       const record = GenerationExecutionSchema.parse({ id: randomUUID(), version: 1, intent, state: 'prepared',
         reserved_minor: request.reserved_minor, confirmed_minor: 0, provider_job: null, diagnostic: null, lease_token: null, lease_until: null });
+      await assertInstallationBudget(client,request.currency,request.reserved_minor);
       await client.query('INSERT INTO generation_heads(id,production_id,execution_key,attempt,fingerprint,version) VALUES($1,$2,$3,$4,$5,1)',
         [record.id, production.id, request.execution_key, request.attempt, fingerprint]);
       await append(client, record);
+      await client.query('INSERT INTO generation_admission_times(execution_id) VALUES($1)',[record.id]);
       if(!deferCosts)await updateCosts(client, production);
       return record;
   }
@@ -131,6 +134,7 @@ export class PostgresGenerationQueue implements GenerationQueue {
         return { ...current, state: 'unknown', diagnostic: 'Envio ambíguo; consulta por chave necessária. Não reenviar.', lease_token: null, lease_until: null };
       }
       if (current.state === 'prepared' && !['preparing', 'awaiting_decision', 'producing','correcting'].includes(production.status)) return null;
+      if(current.state==='prepared'&&current.reserved_minor>0)await assertInstallationBudget(client,current.intent.request.currency,0,true);
       return { ...current, state: current.state === 'prepared' ? 'submitting' : current.state,
         lease_token: randomUUID(), lease_until: new Date(time.getTime() + leaseSeconds * 1000).toISOString() };
     });

@@ -1,0 +1,97 @@
+name: fbrvideos
+x-runtime: &runtime
+  image: fbrvideos-runtime:${FBR_RELEASE_TAG:-local}
+  build:
+    context: .
+    target: runtime
+  init: true
+  stop_grace_period: 60s
+  environment: &environment
+    DATABASE_URL: postgresql://fbr:${POSTGRES_PASSWORD:?Configure a senha no arquivo de ambiente de deploy}@postgres:5432/fbr
+    FBR_ASSET_ROOT: /app/var/assets
+    FBR_GENERATION_MODE: ${FBR_GENERATION_MODE:-synthetic}
+    FBR_PLANNER: ${FBR_PLANNER:-extractive}
+    FBR_PROVIDER_BINDINGS_MODULE: ${FBR_PROVIDER_BINDINGS_MODULE:-}
+    FBR_CODEX_EXECUTABLE: ${FBR_CODEX_EXECUTABLE:-}
+    HF_API_KEY: ${HF_API_KEY:-}
+    HEYGEN_API_KEY: ${HEYGEN_API_KEY:-}
+    API_HOST: 0.0.0.0
+    API_PORT: 3001
+    APP_TIMEZONE: America/Sao_Paulo
+    FBR_OPERATOR_ACCESS_TOKEN: ${FBR_OPERATOR_ACCESS_TOKEN:?Configure uma chave de acesso de pelo menos 32 caracteres}
+    FBR_ALLOWED_HOSTS: ${FBR_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    FBR_ALLOWED_ORIGINS: ${FBR_ALLOWED_ORIGINS:-https://localhost:8443,https://127.0.0.1:8443}
+  volumes:
+    - fbr_assets:/app/var/assets
+    - ./deploy/bindings:/app/deploy/bindings:ro
+  security_opt:
+    - no-new-privileges:true
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fbr
+      POSTGRES_USER: fbr
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Configure a senha no arquivo de ambiente de deploy}
+    volumes:
+      - fbr_postgres:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U fbr -d fbr"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  migrate:
+    <<: *runtime
+    command: [node, --import, tsx, packages/infra/src/migrate.ts]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+  api:
+    <<: *runtime
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3001/api/readiness',{headers:{Authorization:'Bearer '+process.env.FBR_OPERATOR_ACCESS_TOKEN}}).then(async r=>{if(!r.ok||!(await r.json()).ready)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+  worker:
+    <<: *runtime
+    command: [node, --import, tsx, apps/worker/src/server.ts]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  web:
+    image: fbrvideos-web:${FBR_RELEASE_TAG:-local}
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    ports:
+      - "${FBR_BIND_ADDRESS:-127.0.0.1}:${FBR_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ${FBR_TLS_DIRECTORY:-./deploy/certs}:/etc/nginx/certs:ro
+    depends_on:
+      api:
+        condition: service_healthy
+  backup:
+    <<: *runtime
+    profiles: [maintenance]
+    command: [node, --import, tsx, tools/container-backup.ts]
+    volumes:
+      - fbr_assets:/app/var/assets
+      - fbr_backups:/backups
+      - ./deploy/bindings:/app/deploy/bindings:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  fbr_postgres:
+  fbr_assets:
+  fbr_backups:
