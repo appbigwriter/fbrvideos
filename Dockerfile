@@ -42,4 +42,4 @@ RUN mkdir -p /app/var/assets /backups /app/deploy/bindings \
     && chown -R node:node /app/var /backups /app/deploy
 USER node
 EXPOSE 3001
-CMD ["node", "--import", "tsx", "apps/api/src/server.ts"]
+CMD ["sh", "-c", "node --import tsx packages/infra/src/migrate.ts && node --import tsx apps/api/src/server.ts"]
