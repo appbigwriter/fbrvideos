@@ -38,6 +38,7 @@ COPY --chown=node:node apps ./apps
 COPY --chown=node:node packages ./packages
 COPY --chown=node:node tools ./tools
 COPY --chown=node:node tsconfig.json ./
+COPY --from=build --chown=node:node /app/apps/web/dist ./apps/web/dist
 RUN mkdir -p /app/var/assets /backups /app/deploy/bindings \
     && chown -R node:node /app/var /backups /app/deploy
 USER node

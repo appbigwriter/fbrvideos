@@ -1,4 +1,7 @@
 import Fastify,{type FastifyReply} from 'fastify';
+import { existsSync, statSync, createReadStream } from 'node:fs';
+import { resolve, extname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import {OperatorAccess} from './access.js';
 import { CONTRACT_VERSION, EntityKindSchema, IdSchema, ArticleSchema, CharacterSchema, ReferenceSchema, ProfileSchema,
@@ -10,6 +13,26 @@ import { AudiovisualCheckRequestSchema, ProductionsListSchema, ProductionSchema,
   ReviewViewSchema, ReviewPointSchema, DeliveryViewSchema, CorrectionSchema, RenderHistorySchema,SpeechEditViewSchema,
   type GenerationQueue, type Character, type Profile, type Reference } from '@fbr/contracts';
 
+const STATIC_MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
 const pagination = z.strictObject({ q: z.string().max(300).optional(), source_author: z.string().max(300).optional(),
   character_id: IdSchema.optional(), status: ArticleSchema.shape.status.optional(),
   offset: z.coerce.number().int().min(0).default(0), limit: z.coerce.number().int().min(1).max(100).default(25) });
@@ -20,6 +43,8 @@ const schemas = { articles: ArticleSchema, characters: CharacterSchema, referenc
 export function buildApp(service: ConfigurationService, options: { installation?:import('@fbr/infra').InstallationService;providerDiagnostics?:()=>Promise<unknown>;referenceMedia?:import('@fbr/infra').ReferenceMediaService; capture?: typeof captureArticle; allowedOrigins?: string[];allowedHosts?:string[];accessToken?:string;secureCookie?:boolean; productions?: ProductionService; planner?: AutomaticPlanner; generation?: GenerationQueue; review?: PostgresReviewWorkflow;operationalState?:()=>Promise<unknown>;prepareCorrection?:(id:string)=>Promise<void>;pipeline?:ProductionPipeline;calibration?:CalibrationService;readiness?:()=>Promise<unknown>;retentionPlan?:()=>Promise<unknown>;budget?:PostgresBudgetWorkflow;providerCallback?:import('@fbr/infra').ProviderRuntime['receiveCallback'];recordTelemetry?:(snapshot:ReturnType<OperationalTelemetry['snapshot']>)=>Promise<unknown>;operationalHistory?:()=>Promise<unknown> } = {}) {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
   const allowedOrigins = options.allowedOrigins ?? ['http://127.0.0.1:5173','http://localhost:5173'];
+  const webDist = resolve(fileURLToPath(new URL('../../web/dist', import.meta.url)));
+  const hasWebDist = existsSync(webDist);
   const telemetry=new OperationalTelemetry();
   if(options.recordTelemetry){const metricsTimer=setInterval(()=>{void options.recordTelemetry!(telemetry.snapshot()).catch(()=>{});},60000);metricsTimer.unref();app.addHook('onClose',async()=>{clearInterval(metricsTimer);});}
   if(options.operationalHistory)app.get('/api/operations/history',async()=>options.operationalHistory!());
@@ -35,10 +60,42 @@ export function buildApp(service: ConfigurationService, options: { installation?
     if (request.method === 'OPTIONS') return reply.header('Access-Control-Allow-Methods','GET,POST,OPTIONS')
       .header('Access-Control-Allow-Headers','Content-Type,Authorization').code(204).send();
     if(request.headers['sec-fetch-site']==='cross-site'&&request.method!=='GET')return reply.code(403).send({message:'Origem não permitida.'});
+    const isApi = request.url.startsWith('/api/') || request.url === '/health';
     const publicSession=request.url==='/api/session'&&['GET','POST'].includes(request.method);
     const callback=options.providerCallback&&request.method==='POST'&&/^\/api\/provider-callbacks\/[\w.:-]+$/.test(request.url);
-    if(access&&!publicSession&&!callback&&request.url!=='/health'&&!access.authenticated(request.headers.authorization,request.headers.cookie))
+    if(isApi&&access&&!publicSession&&!callback&&request.url!=='/health'&&!access.authenticated(request.headers.authorization,request.headers.cookie))
       return reply.code(401).header('Cache-Control','no-store').send({message:'Autentique-se para acessar esta instalação.'});
+  });
+  if (hasWebDist) {
+    app.get('/', async (_request, reply) => {
+      reply.header('Cache-Control', 'no-cache');
+      return reply.type('text/html; charset=utf-8').send(createReadStream(resolve(webDist, 'index.html')));
+    });
+  }
+  app.setNotFoundHandler(async (request, reply) => {
+    if (request.url.startsWith('/api/')) {
+      return reply.code(404).send(ErrorSchema.parse({ code: 'not_found', message: 'Rota não encontrada.', retryable: false, correlation_id: `request_${request.id}`, issues: [] }));
+    }
+    if (hasWebDist && (request.method === 'GET' || request.method === 'HEAD')) {
+      const pathname = new URL(request.url, 'http://localhost').pathname;
+      const filePath = resolve(webDist, '.' + pathname);
+      if (filePath.startsWith(webDist) && existsSync(filePath) && statSync(filePath).isFile()) {
+        const ext = extname(filePath).toLowerCase();
+        const contentType = STATIC_MIME_TYPES[ext] ?? 'application/octet-stream';
+        if (pathname.startsWith('/assets/')) {
+          reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+        } else {
+          reply.header('Cache-Control', 'no-cache');
+        }
+        return reply.type(contentType).send(createReadStream(filePath));
+      }
+      const indexPath = resolve(webDist, 'index.html');
+      if (existsSync(indexPath)) {
+        reply.header('Cache-Control', 'no-cache');
+        return reply.type('text/html; charset=utf-8').send(createReadStream(indexPath));
+      }
+    }
+    return reply.code(404).send({ message: 'Não encontrado.' });
   });
   app.get('/api/session',async(request,reply)=>reply.header('Cache-Control','no-store').send({required:!!access,authenticated:!access||access.authenticated(request.headers.authorization,request.headers.cookie)}));
   app.post('/api/session',async(request,reply)=>{
